@@ -11,6 +11,12 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      # The Rust compiler version is governed by rust-toolchain.toml (kept in
+      # lockstep with the builder image so local/CI/Docker share one clippy).
+      # Bump Rust deliberately across both files, not via a Dockerfile-only PR
+      # that would drift and fail on new -D warnings lints.
+      - dependency-name: rust
 
   # Rust dependency tree — pairs with the daily RustSec audit in ci.yml.
   - package-ecosystem: cargo

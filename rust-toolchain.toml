@@ -1,6 +1,6 @@
-# Keep in lockstep with the Dockerfile builder image (rust:1.94-alpine).
+# Keep in lockstep with the Dockerfile builder image (rust:1.96-alpine).
 # CI installs from this file, so all build paths share one compiler — this
 # matters with clippy::nursery enabled, whose lints change between releases.
 [toolchain]
-channel = "1.94"
+channel = "1.96"
 components = ["rustfmt", "clippy"]

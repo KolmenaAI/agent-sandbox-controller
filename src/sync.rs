@@ -100,7 +100,7 @@ pub fn run_with(cfg: &SyncConfig) -> Result<Summary, SyncError> {
     let workspace_root = cfg.workspace_root.as_path();
 
     let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(60))
+        .timeout(Duration::from_mins(1))
         .build()
         .map_err(|e| SyncError::Config(format!("http client init failed: {e}")))?;
 

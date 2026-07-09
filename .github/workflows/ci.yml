@@ -18,6 +18,7 @@ jobs:
       # Installs the pinned toolchain + components from rust-toolchain.toml —
       # the same compiler as local builds and the Dockerfile.
       - run: rustup toolchain install
+      - run: rustup target add x86_64-unknown-linux-musl
       - uses: Swatinem/rust-cache@v2
       - uses: actions/cache@v4
         with:
@@ -28,6 +29,28 @@ jobs:
       - run: pipx install pre-commit
       - run: pre-commit run --all-files --show-diff-on-failure
       - run: cargo test
+
+      # Test on musl target (the actual binary used in production Docker image)
+      - name: Test (musl target)
+        run: cargo test --target x86_64-unknown-linux-musl
+
+      # Build release binary and verify optimizations
+      - name: Build (musl release)
+        run: cargo build --release --target x86_64-unknown-linux-musl
+
+      - name: Verify binary size and strip status
+        run: |
+          SIZE=$(stat -c%s target/x86_64-unknown-linux-musl/release/agent-sandbox-controller)
+          echo "Binary size: $SIZE bytes"
+
+          # Verify it's actually stripped (should be < 15MB for release profile)
+          if [ $SIZE -ge 15728640 ]; then
+            echo "::error::Binary too large! Expected < 15MB, got $(numfmt --to=iec $SIZE)"
+            exit 1
+          fi
+
+          # Show file info to verify it's stripped
+          file target/x86_64-unknown-linux-musl/release/agent-sandbox-controller
 
   # RustSec advisories against the dependency tree — this binary downloads and
   # extracts remote content inside every agent pod, so vuln alerts matter.
@@ -53,6 +76,67 @@ jobs:
           push: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # Smoke test the Docker image: verify it builds, starts, and responds to requests.
+  # Runs only on non-tag builds (like image-build) to catch runtime issues before merge.
+  image-smoke-test:
+    if: "!startsWith(github.ref, 'refs/tags/')"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build image for testing
+        uses: docker/build-buildx-action@v3
+        with:
+          context: .
+          load: true
+          tags: controller:smoke-test
+          cache-from: type=gha
+
+      - name: Verify binary exists and is executable in image
+        run: |
+          docker run --rm controller:smoke-test \
+            test -x /app/agent-sandbox-controller
+
+      - name: Test /health endpoint
+        run: |
+          # Start container with necessary environment
+          docker run -d --name controller \
+            -e WORKSPACE_ROOT=/tmp/workspace \
+            -p 8888:8888 \
+            controller:smoke-test
+
+          # Wait for startup
+          sleep 2
+
+          # Test health endpoint responds
+          if ! curl -sf http://localhost:8888/health > /dev/null; then
+            echo "::error::Health endpoint failed"
+            docker logs controller
+            exit 1
+          fi
+
+          # Cleanup
+          docker stop controller
+
+      - name: Test /status endpoint
+        run: |
+          docker run -d --name controller \
+            -e WORKSPACE_ROOT=/tmp/workspace \
+            -p 8888:8888 \
+            controller:smoke-test
+
+          sleep 2
+
+          # Test status endpoint returns valid JSON with sync_enabled field
+          STATUS=$(curl -sf http://localhost:8888/status)
+          if ! echo "$STATUS" | grep -q "sync_enabled"; then
+            echo "::error::Status endpoint missing sync_enabled"
+            exit 1
+          fi
+
+          docker stop controller
 
   release:
     # A release is a `vX.Y.Z` tag — and ONLY that. No edge/latest/dev/prod

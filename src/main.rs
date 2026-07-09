@@ -32,7 +32,15 @@ fn main() {
         Err(e) => tracing::warn!("boot sync failed ({e})"),
     }
 
-    let exit_code = if std::env::var("MODE").unwrap_or_default().trim() == "sidecar" {
+    let mode = std::env::var("MODE").unwrap_or_default();
+    let mode = mode.trim();
+    let is_sidecar = mode == "sidecar";
+    tracing::info!(
+        mode = if is_sidecar { "sidecar" } else { "oneshot" },
+        "startup mode resolved"
+    );
+
+    let exit_code = if is_sidecar {
         // Two worker threads, not one-per-core: this resident per-pod sidecar
         // serves a low-traffic control port, and async I/O multiplexing gives
         // request concurrency regardless of thread count. Blocking work (file

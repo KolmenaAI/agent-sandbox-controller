@@ -25,7 +25,25 @@ impl Telemetry {
 }
 
 pub fn init() -> Telemetry {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let rust_log = std::env::var("RUST_LOG").unwrap_or_default();
+    let rust_log = rust_log.trim();
+    let filter = EnvFilter::try_from_default_env().map_or_else(
+        |_| {
+            if !rust_log.is_empty() {
+                tracing::warn!(
+                    rust_log,
+                    "RUST_LOG invalid, falling back to default level=info"
+                );
+            }
+            EnvFilter::new("info")
+        },
+        |f| {
+            if !rust_log.is_empty() {
+                tracing::debug!(rust_log, "log filter configured");
+            }
+            f
+        },
+    );
     let fmt_layer = tracing_subscriber::fmt::layer().with_target(false);
     let registry = tracing_subscriber::registry().with(filter).with(fmt_layer);
 
@@ -62,9 +80,53 @@ fn build_provider(
 ) -> Result<opentelemetry_sdk::logs::SdkLoggerProvider, Box<dyn std::error::Error>> {
     use opentelemetry_otlp::WithExportConfig;
 
+    // Check for logs-specific endpoint; fall back to general OTLP endpoint.
+    let logs_endpoint = std::env::var("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT")
+        .ok()
+        .and_then(|e| {
+            let e = e.trim();
+            if e.is_empty() {
+                None
+            } else {
+                Some(e.to_string())
+            }
+        })
+        .unwrap_or_else(|| endpoint.to_string());
+
+    // Normalize the endpoint: remove trailing slash and avoid doubling /v1/logs.
+    let logs_endpoint = logs_endpoint.trim().trim_end_matches('/').to_string();
+    let full_endpoint = if logs_endpoint.ends_with("/v1/logs") {
+        logs_endpoint
+    } else {
+        format!("{logs_endpoint}/v1/logs")
+    };
+
+    // Resolve protocol: this binary only supports HTTP (http-proto feature).
+    // Warn if gRPC is requested, but use HTTP anyway.
+    let protocol = std::env::var("OTEL_EXPORTER_OTLP_PROTOCOL")
+        .unwrap_or_default()
+        .to_lowercase();
+    let protocol = protocol.trim();
+    if protocol == "grpc" || protocol == "grpcs" {
+        tracing::warn!(
+            protocol,
+            "OTEL_EXPORTER_OTLP_PROTOCOL=grpc is not supported (http-proto only), using http"
+        );
+    } else if !protocol.is_empty() && protocol != "http" && protocol != "http/protobuf" {
+        tracing::warn!(
+            protocol,
+            "OTEL_EXPORTER_OTLP_PROTOCOL unrecognized, defaulting to http"
+        );
+    }
+
+    tracing::debug!(
+        endpoint = &full_endpoint,
+        "otlp log export configured (http/protobuf)"
+    );
+
     let exporter = opentelemetry_otlp::LogExporter::builder()
         .with_http()
-        .with_endpoint(format!("{endpoint}/v1/logs"))
+        .with_endpoint(&full_endpoint)
         .build()?;
     let service =
         std::env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| "agent-sandbox-controller".into());

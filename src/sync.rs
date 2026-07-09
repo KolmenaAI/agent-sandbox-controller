@@ -128,7 +128,13 @@ pub fn run_with(cfg: &SyncConfig) -> Result<Summary, SyncError> {
         )));
     }
     let manifest = read_manifest(workspace_root);
-    let summary = apply_diff(&client, workspace_root, &body.items, &manifest);
+    let summary = apply_diff(
+        &client,
+        workspace_root,
+        &body.items,
+        &manifest,
+        &body.digest,
+    );
 
     tracing::info!(
         added = summary.added.len(),
@@ -464,6 +470,11 @@ mod tests {
 
     #[test]
     fn config_errors_do_not_retry() {
+        // Clean up any existing state
+        std::env::remove_var("RESOLVE_URL");
+        std::env::remove_var("RESOLVE_TOKEN");
+        std::env::remove_var("WORKSPACE_ROOT");
+
         // Missing token is a config error
         std::env::set_var("RESOLVE_URL", "http://example.com/resolve");
         std::env::remove_var("RESOLVE_TOKEN");

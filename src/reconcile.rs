@@ -48,6 +48,8 @@ pub struct Summary {
     pub updated: Vec<String>,
     pub removed: Vec<String>,
     pub errors: Vec<String>,
+    /// Digest from the resolve response, enables convergence verification.
+    pub digest: String,
 }
 
 pub struct Diff<'a> {
@@ -119,10 +121,26 @@ fn manifest_path(workspace_root: &Path) -> PathBuf {
 /// Read the ownership manifest. A missing or corrupt file is treated as empty —
 /// a full re-apply is safe and idempotent.
 pub fn read_manifest(workspace_root: &Path) -> Manifest {
-    fs::read(manifest_path(workspace_root))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or_default()
+    match fs::read(manifest_path(workspace_root)) {
+        Ok(bytes) => match serde_json::from_slice(&bytes) {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!(
+                    path = ?manifest_path(workspace_root),
+                    "manifest corrupted, resetting: {e}"
+                );
+                Manifest::new()
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Manifest::new(),
+        Err(e) => {
+            tracing::warn!(
+                path = ?manifest_path(workspace_root),
+                "manifest read failed, resetting: {e}"
+            );
+            Manifest::new()
+        }
+    }
 }
 
 /// Write the manifest atomically (tmp + rename).
@@ -136,14 +154,18 @@ pub fn write_manifest(workspace_root: &Path, manifest: &Manifest) -> Result<()> 
 }
 
 /// Apply a diff to the PVC. Per-item errors are isolated so one bad bundle can't
-/// abort the batch. Returns the summary and the updated manifest.
+/// abort the batch. Returns the summary with the updated manifest (only writes if changed).
 pub fn apply_diff(
     client: &reqwest::blocking::Client,
     workspace_root: &Path,
     desired: &[ResolvedResource],
     manifest: &Manifest,
+    digest: &str,
 ) -> Summary {
-    let mut summary = Summary::default();
+    let mut summary = Summary {
+        digest: digest.to_string(),
+        ..Default::default()
+    };
     let mut next = manifest.clone();
     let Diff { apply, remove } = diff(workspace_root, desired, manifest);
 
@@ -193,9 +215,11 @@ pub fn apply_diff(
         }
     }
 
-    // Persist the reconciled ownership set.
-    if let Err(err) = write_manifest(workspace_root, &next) {
-        summary.errors.push(format!("manifest: {err}"));
+    // Persist the reconciled ownership set if manifest changed.
+    if next != *manifest {
+        if let Err(err) = write_manifest(workspace_root, &next) {
+            summary.errors.push(format!("manifest: {err}"));
+        }
     }
     summary
 }
@@ -484,6 +508,8 @@ mod apply_diff_tests {
                 sha256: "aaa".to_string(),
             },
         );
+        // Write the manifest to disk so apply_diff can read it back
+        write_manifest(&workspace, &manifest).unwrap();
 
         // Desired set is empty (we want to remove it)
         let desired: Vec<ResolvedResource> = vec![];
@@ -498,7 +524,7 @@ mod apply_diff_tests {
 
         // Try to apply (which would remove the read-only directory)
         let client = reqwest::blocking::Client::new();
-        let summary = apply_diff(&client, &workspace, &desired, &manifest);
+        let summary = apply_diff(&client, &workspace, &desired, &manifest, "");
 
         // Restore permissions for cleanup
         #[cfg(unix)]
@@ -554,7 +580,7 @@ mod apply_diff_tests {
 
         // Try to apply (which would remove the missing directory)
         let client = reqwest::blocking::Client::new();
-        let summary = apply_diff(&client, &workspace, &desired, &manifest);
+        let summary = apply_diff(&client, &workspace, &desired, &manifest, "");
 
         // Should succeed (NotFound is treated as already-removed)
         assert!(

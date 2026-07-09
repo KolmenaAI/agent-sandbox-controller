@@ -59,6 +59,8 @@ pub struct SyncStatus {
     pub updated: Vec<String>,
     pub removed: Vec<String>,
     pub errors: Vec<String>,
+    /// Digest from the resolve response, enables convergence verification.
+    pub digest: String,
 }
 
 impl SyncStatus {
@@ -78,6 +80,7 @@ impl SyncStatus {
                 updated: s.updated.clone(),
                 removed: s.removed.clone(),
                 errors: s.errors.clone(),
+                digest: s.digest.clone(),
             }),
             Err(SyncError::Disabled) => None,
             Err(e) => Some(Self {
@@ -87,6 +90,7 @@ impl SyncStatus {
                 updated: Vec::new(),
                 removed: Vec::new(),
                 errors: vec![e.to_string()],
+                digest: String::new(),
             }),
         }
     }
@@ -146,6 +150,50 @@ pub fn app(state: AppState) -> Router {
         )
 }
 
+fn parse_env_u64(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| {
+            let trimmed = v.trim();
+            trimmed.parse::<u64>().map_or_else(
+                |_| {
+                    tracing::warn!(
+                        value = trimmed,
+                        "{}={} invalid, using default {}",
+                        name,
+                        trimmed,
+                        default
+                    );
+                    None
+                },
+                Some,
+            )
+        })
+        .unwrap_or(default)
+}
+
+fn parse_env_u16(name: &str, default: u16) -> u16 {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| {
+            let trimmed = v.trim();
+            trimmed.parse::<u16>().map_or_else(
+                |_| {
+                    tracing::warn!(
+                        value = trimmed,
+                        "{}={} invalid, using default {}",
+                        name,
+                        trimmed,
+                        default
+                    );
+                    None
+                },
+                Some,
+            )
+        })
+        .unwrap_or(default)
+}
+
 /// Returns the process exit code so `main` can flush telemetry before exiting.
 pub async fn serve(boot_sync: &Result<Summary, SyncError>) -> i32 {
     let root = std::env::var("WORKSPACE_ROOT").unwrap_or_default();
@@ -162,13 +210,13 @@ pub async fn serve(boot_sync: &Result<Summary, SyncError>) -> i32 {
         return 1;
     }
 
-    let execute_timeout = std::env::var("EXECUTE_TIMEOUT_SECS")
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
-        .map_or(
-            Duration::from_secs(DEFAULT_EXECUTE_TIMEOUT_SECS),
-            Duration::from_secs,
-        );
+    let execute_timeout_secs = parse_env_u64("EXECUTE_TIMEOUT_SECS", DEFAULT_EXECUTE_TIMEOUT_SECS);
+    let execute_timeout = Duration::from_secs(execute_timeout_secs);
+    tracing::debug!(
+        timeout_secs = execute_timeout_secs,
+        "execute timeout configured"
+    );
+
     let sync_enabled = !std::env::var("RESOLVE_URL")
         .unwrap_or_default()
         .trim()
@@ -180,10 +228,7 @@ pub async fn serve(boot_sync: &Result<Summary, SyncError>) -> i32 {
         SyncStatus::from_result(boot_sync),
     );
 
-    let port = std::env::var("SERVER_PORT")
-        .ok()
-        .and_then(|p| p.trim().parse().ok())
-        .unwrap_or(DEFAULT_PORT);
+    let port = parse_env_u16("SERVER_PORT", DEFAULT_PORT);
 
     let listener = match tokio::net::TcpListener::bind(("0.0.0.0", port)).await {
         Ok(l) => l,
@@ -197,10 +242,8 @@ pub async fn serve(boot_sync: &Result<Summary, SyncError>) -> i32 {
     // Graceful drain deadline: allows in-flight requests to complete, but with a
     // timeout to ensure we exit before Kubernetes sends SIGKILL. This gives main()
     // time to flush telemetry.
-    let drain_secs = std::env::var("GRACEFUL_DRAIN_SECS")
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
-        .unwrap_or(DEFAULT_GRACEFUL_DRAIN_SECS);
+    let drain_secs = parse_env_u64("GRACEFUL_DRAIN_SECS", DEFAULT_GRACEFUL_DRAIN_SECS);
+    tracing::debug!(drain_secs, "graceful drain timeout configured");
     let drain_timeout = Duration::from_secs(drain_secs);
 
     let serve_result = tokio::time::timeout(

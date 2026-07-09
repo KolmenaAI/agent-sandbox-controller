@@ -29,7 +29,7 @@ pub struct ResolvedResource {
     pub bundle_url: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManifestEntry {
     pub version: String,
     pub sha256: String,
@@ -80,10 +80,10 @@ fn manifest_path(workspace_root: &Path) -> PathBuf {
 /// Read the ownership manifest. A missing or corrupt file is treated as empty —
 /// a full re-apply is safe and idempotent.
 pub fn read_manifest(workspace_root: &Path) -> Manifest {
-    match fs::read(manifest_path(workspace_root)) {
-        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
-        Err(_) => Manifest::new(),
-    }
+    fs::read(manifest_path(workspace_root))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
 }
 
 /// Write the manifest atomically (tmp + rename).
@@ -102,11 +102,11 @@ pub fn apply_diff(
     client: &reqwest::blocking::Client,
     workspace_root: &Path,
     desired: &[ResolvedResource],
-    manifest: Manifest,
+    manifest: &Manifest,
 ) -> Summary {
     let mut summary = Summary::default();
     let mut next = manifest.clone();
-    let Diff { apply, remove } = diff(desired, &manifest);
+    let Diff { apply, remove } = diff(desired, manifest);
 
     for item in apply {
         if let Err(err) = apply_one(client, workspace_root, item) {

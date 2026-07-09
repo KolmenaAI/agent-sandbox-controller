@@ -4,7 +4,7 @@
 //! just that container in place (no pod reschedule, no image pull).
 
 pub enum RestartError {
-    /// AGENT_PROCESS_PATTERN not configured — not retryable.
+    /// `AGENT_PROCESS_PATTERN` not configured — not retryable.
     Config(String),
     /// No matching process right now (agent may be mid-restart).
     NotFound(String),
@@ -64,6 +64,6 @@ fn find_pid(pattern: &str) -> Option<i32> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn find_pid(_pattern: &str) -> Option<i32> {
+const fn find_pid(_pattern: &str) -> Option<i32> {
     None // /proc scanning is Linux-only; dev machines just report not-found.
 }

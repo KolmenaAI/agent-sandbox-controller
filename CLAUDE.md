@@ -13,9 +13,9 @@ cargo clippy --all-targets -- -D warnings   # CI treats clippy warnings as error
 cargo build --release                       # size-optimized static binary (opt-level=z, LTO, panic=abort)
 ```
 
-CI (`.github/workflows/ci.yml`) runs fmt-check, clippy `-D warnings`, and tests on every PR; pushes to main/tags additionally build and push the Docker image to GHCR.
+CI (`.github/workflows/ci.yml`) runs `pre-commit run --all-files` plus `cargo test` on every PR; pushes to main/tags additionally build and push the Docker image to GHCR.
 
-Pre-commit hooks (`.pre-commit-config.yaml`) run rustfmt, cargo check, and clippy plus generic hygiene checks; set up with `pre-commit install`.
+Pre-commit hooks (`.pre-commit-config.yaml`) run rustfmt, cargo check, and clippy plus generic hygiene checks; set up with `pre-commit install`. Clippy runs at `pedantic` + `nursery` strictness via `[lints.clippy]` in Cargo.toml (warn level — the `-D warnings` flag promotes to errors).
 
 ## What this is
 

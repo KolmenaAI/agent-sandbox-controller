@@ -24,8 +24,8 @@ pub enum SyncError {
 impl fmt::Display for SyncError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            SyncError::Disabled => f.write_str("sync disabled — RESOLVE_URL not set"),
-            SyncError::Config(m) | SyncError::Upstream(m) => f.write_str(m),
+            Self::Disabled => f.write_str("sync disabled — RESOLVE_URL not set"),
+            Self::Config(m) | Self::Upstream(m) => f.write_str(m),
         }
     }
 }
@@ -89,7 +89,7 @@ pub fn run() -> Result<Summary, SyncError> {
         )));
     }
     let manifest = read_manifest(workspace_root);
-    let summary = apply_diff(&client, workspace_root, &body.items, manifest);
+    let summary = apply_diff(&client, workspace_root, &body.items, &manifest);
 
     tracing::info!(
         added = summary.added.len(),

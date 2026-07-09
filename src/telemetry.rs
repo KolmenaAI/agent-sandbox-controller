@@ -1,7 +1,7 @@
 //! Leveled logging (`tracing`, filtered via `RUST_LOG`, default `info`) plus
 //! optional OTLP log export for WARN+ events.
 //!
-//! The OTel pipeline is armed at runtime by `OTEL_EXPORTER_OTLP_ENDPOINT` being
+//! The `OTel` pipeline is armed at runtime by `OTEL_EXPORTER_OTLP_ENDPOINT` being
 //! set (same convention the agents use); without it, logs go to stdout only.
 //! The batch processor exports from its own background thread, so the blocking
 //! HTTP client never runs on an async worker.
@@ -15,7 +15,7 @@ pub struct Telemetry {
 }
 
 impl Telemetry {
-    /// Flush any buffered OTel log records. Call before process exit —
+    /// Flush any buffered `OTel` log records. Call before process exit —
     /// especially in oneshot mode, where the process ends right after the sync.
     pub fn shutdown(self) {
         if let Some(provider) = self.provider {

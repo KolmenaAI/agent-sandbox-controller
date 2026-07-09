@@ -180,8 +180,7 @@ fn list_dir(path: &std::path::Path) -> Result<Vec<ListEntry>, ()> {
             .modified()
             .ok()
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+            .map_or(0, |d| d.as_secs());
         out.push(ListEntry {
             name: entry.file_name().to_string_lossy().into_owned(),
             size: meta.len(),
@@ -338,7 +337,7 @@ mod tests {
         assert!(safe_rel_path("//").is_err());
     }
 
-    /// SDK-shaped multipart body (mirrors the TS client's buildMultipart()).
+    /// SDK-shaped multipart body (mirrors the TS client's `buildMultipart()`).
     fn sdk_multipart(boundary: &str, filename: &str, content: &[u8]) -> Vec<u8> {
         let mut body = Vec::new();
         body.extend_from_slice(

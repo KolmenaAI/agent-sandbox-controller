@@ -168,6 +168,32 @@ the presence of their env vars:
 | `RESOLVE_URL` | declarative sync enabled (boot sync + `POST /sync`) | sync disabled — pure generic sandbox runtime (`/sync` → 501) |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | WARN+ events exported via OTLP to your observability backend; `OTEL_SERVICE_NAME` overrides the service name | stdout logging only |
 
+## TLS & Certificate Verification
+
+This binary uses **`rustls` with Mozilla's webpki root store**, compiled at build time.
+
+### Custom/Private Certificate Authority
+
+Custom CA certificates are **not** supported. System CA files (e.g., `/etc/ssl/certs`)
+are ignored; this binary contains the TLS roots at compile time.
+
+**If `RESOLVE_URL` uses a private CA:**
+
+This currently does not work. Options:
+
+1. **Use a public certificate** — even for internal services. Many organizations issue
+   internal certs via ACME (e.g., Let's Encrypt) or a public CA.
+2. **Reverse proxy** — place a TLS-terminating reverse proxy (e.g., via Kubernetes
+   Cert-Manager + public CA) in front of your resolve endpoint.
+3. **Certificate pinning** (future) — would require a code change to load CA certs
+   from a mounted ConfigMap and use `rustls` with a custom root store.
+
+This is an intentional trade-off: hardcoding webpki roots ensures:
+
+- **Reproducible builds** — same code always uses the same roots, no host dependency
+- **Simplified auditing** — one root store, not different per deployment
+- **No misleading CA mounts** — operators don't accidentally think custom CAs work
+
 ## Logging
 
 `tracing` with `RUST_LOG` filtering (default `info`). For app-level debug

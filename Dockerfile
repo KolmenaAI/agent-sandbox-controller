@@ -8,17 +8,17 @@ WORKDIR /app
 
 # Pre-compile dependencies for layer caching (stub main, then the real source).
 COPY Cargo.toml Cargo.lock ./
-RUN mkdir src && echo 'fn main() {}' > src/main.rs && cargo build --release && rm -rf src
+RUN mkdir src && echo 'fn main() {}' > src/main.rs && cargo build --release --locked && rm -rf src
 
 COPY src ./src
-RUN touch src/main.rs && cargo build --release
+RUN touch src/main.rs && cargo build --release --locked
 
 FROM alpine:3.24.1
 
-RUN apk add --no-cache ca-certificates
-
 # uid/gid 1001 matches the agent workspace volume ownership (fsGroup: 1001) so
 # the controller can write to the mounted workspace.
+# Note: This binary uses rustls with webpki-roots (hardcoded at compile time),
+# so system CA certificates are not used. Mounting custom CAs has no effect.
 RUN addgroup -g 1001 -S sandbox && adduser -S -u 1001 -G sandbox sandbox
 
 COPY --from=build /app/target/release/agent-sandbox-controller /usr/local/bin/agent-sandbox-controller

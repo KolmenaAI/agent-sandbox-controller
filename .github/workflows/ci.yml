@@ -21,7 +21,6 @@ jobs:
       # Installs the pinned toolchain + components from rust-toolchain.toml —
       # the same compiler as local builds and the Dockerfile.
       - run: rustup toolchain install
-      - run: rustup target add x86_64-unknown-linux-musl
       - uses: Swatinem/rust-cache@v2
       - uses: actions/cache@v4
         with:
@@ -32,28 +31,10 @@ jobs:
       - run: pipx install pre-commit
       - run: pre-commit run --all-files --show-diff-on-failure
       - run: cargo test
-
-      # Test on musl target (the actual binary used in production Docker image)
-      - name: Test (musl target)
-        run: cargo test --target x86_64-unknown-linux-musl
-
-      # Build release binary and verify optimizations
-      - name: Build (musl release)
-        run: cargo build --release --target x86_64-unknown-linux-musl --locked
-
-      - name: Verify binary size and strip status
-        run: |
-          SIZE=$(stat -c%s target/x86_64-unknown-linux-musl/release/agent-sandbox-controller)
-          echo "Binary size: $SIZE bytes"
-
-          # Verify it's actually stripped (should be < 15MB for release profile)
-          if [ $SIZE -ge 15728640 ]; then
-            echo "::error::Binary too large! Expected < 15MB, got $(numfmt --to=iec $SIZE)"
-            exit 1
-          fi
-
-          # Show file info to verify it's stripped
-          file target/x86_64-unknown-linux-musl/release/agent-sandbox-controller
+      # The production musl binary is built and size-checked in the image-build /
+      # image-smoke-test jobs (via the alpine Dockerfile). We don't cross-compile
+      # musl here: aws-lc-sys (rustls) needs a musl C toolchain that ubuntu lacks,
+      # and native alpine is the real production build anyway.
 
   # RustSec advisories against the dependency tree — this binary downloads and
   # extracts remote content inside every agent pod, so vuln alerts matter.
@@ -97,12 +78,19 @@ jobs:
           tags: controller:smoke-test
           cache-from: type=gha
 
-      - name: Verify binary exists and is executable in image
+      - name: Verify binary is executable and small
         run: |
-          # Override the entrypoint so `test` runs (otherwise the args just
+          # Override the entrypoint so the shell runs (otherwise the args just
           # append to `agent-sandbox-controller`). Binary lives in /usr/local/bin.
-          docker run --rm --entrypoint sh controller:smoke-test \
-            -c 'test -x /usr/local/bin/agent-sandbox-controller'
+          # Also guard the release size against the real production binary
+          # (stripped, opt-level=z) — regressions here bloat every agent pod.
+          docker run --rm --entrypoint sh controller:smoke-test -c '
+            bin=/usr/local/bin/agent-sandbox-controller
+            test -x "$bin"
+            size=$(stat -c%s "$bin")
+            echo "binary size: $size bytes"
+            [ "$size" -lt 15728640 ] || { echo "::error::binary too large ($size bytes, expected < 15MB)"; exit 1; }
+          '
 
       - name: Test /health and /status endpoints
         run: |

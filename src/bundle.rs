@@ -58,6 +58,14 @@ pub fn extract_tgz(data: &[u8], dest: &Path, max_files: usize, max_total_bytes: 
         let mut entry = entry?;
         let path = entry.path()?.into_owned();
 
+        // Count EVERY entry toward the cap, before the type filter — otherwise a
+        // bundle of millions of header-only entries (symlinks/devices) that we'd
+        // skip below could still spin us with no limit.
+        files += 1;
+        if files > max_files {
+            bail!("bundle exceeds limits ({files} files)");
+        }
+
         if path.is_absolute() || path.components().any(|c| matches!(c, Component::ParentDir)) {
             bail!("unsafe path in bundle: {}", path.display());
         }
@@ -66,10 +74,9 @@ pub fn extract_tgz(data: &[u8], dest: &Path, max_files: usize, max_total_bytes: 
             continue; // skip symlinks/hardlinks/devices
         }
 
-        files += 1;
         total += entry.header().size().unwrap_or(0);
-        if files > max_files || total > max_total_bytes {
-            bail!("bundle exceeds limits ({files} files, {total} bytes)");
+        if total > max_total_bytes {
+            bail!("bundle exceeds limits ({total} bytes)");
         }
 
         // `unpack_in` also refuses to write outside `dest` (defense in depth).

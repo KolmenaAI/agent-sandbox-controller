@@ -36,6 +36,7 @@ use tracing::Level;
 
 use crate::agent::{self, RestartError};
 use crate::reconcile::Summary;
+use crate::safe_path::safe_rel_path;
 use crate::sync::{self, SyncError};
 
 const DEFAULT_PORT: u16 = 8888;
@@ -150,48 +151,24 @@ pub fn app(state: AppState) -> Router {
         )
 }
 
-fn parse_env_u64(name: &str, default: u64) -> u64 {
-    std::env::var(name)
-        .ok()
-        .and_then(|v| {
-            let trimmed = v.trim();
-            trimmed.parse::<u64>().map_or_else(
-                |_| {
-                    tracing::warn!(
-                        value = trimmed,
-                        "{}={} invalid, using default {}",
-                        name,
-                        trimmed,
-                        default
-                    );
-                    None
-                },
-                Some,
-            )
-        })
-        .unwrap_or(default)
-}
-
-fn parse_env_u16(name: &str, default: u16) -> u16 {
-    std::env::var(name)
-        .ok()
-        .and_then(|v| {
-            let trimmed = v.trim();
-            trimmed.parse::<u16>().map_or_else(
-                |_| {
-                    tracing::warn!(
-                        value = trimmed,
-                        "{}={} invalid, using default {}",
-                        name,
-                        trimmed,
-                        default
-                    );
-                    None
-                },
-                Some,
-            )
-        })
-        .unwrap_or(default)
+/// Parse an env var into `T`, warning (and falling back to `default`) on an
+/// unparseable value. An unset var falls back silently — absence is a choice,
+/// a typo is a mistake worth surfacing.
+fn parse_env<T>(name: &str, default: T) -> T
+where
+    T: std::str::FromStr + std::fmt::Display + Copy,
+{
+    let Ok(raw) = std::env::var(name) else {
+        return default;
+    };
+    let trimmed = raw.trim();
+    trimmed.parse::<T>().unwrap_or_else(|_| {
+        tracing::warn!(
+            value = trimmed,
+            "{name}={trimmed} invalid, using default {default}"
+        );
+        default
+    })
 }
 
 /// Returns the process exit code so `main` can flush telemetry before exiting.
@@ -210,9 +187,18 @@ pub async fn serve(boot_sync: &Result<Summary, SyncError>) -> i32 {
         return 1;
     }
 
-    let execute_timeout_secs = parse_env_u64("EXECUTE_TIMEOUT_SECS", DEFAULT_EXECUTE_TIMEOUT_SECS);
+    let execute_timeout_secs = parse_env("EXECUTE_TIMEOUT_SECS", DEFAULT_EXECUTE_TIMEOUT_SECS);
+    // 0 would make every command time out instantly — reject it as a misconfig.
+    let execute_timeout_secs = if execute_timeout_secs == 0 {
+        tracing::warn!(
+            "EXECUTE_TIMEOUT_SECS=0 would time out every command instantly, using default {DEFAULT_EXECUTE_TIMEOUT_SECS}"
+        );
+        DEFAULT_EXECUTE_TIMEOUT_SECS
+    } else {
+        execute_timeout_secs
+    };
     let execute_timeout = Duration::from_secs(execute_timeout_secs);
-    tracing::debug!(
+    tracing::info!(
         timeout_secs = execute_timeout_secs,
         "execute timeout configured"
     );
@@ -228,7 +214,7 @@ pub async fn serve(boot_sync: &Result<Summary, SyncError>) -> i32 {
         SyncStatus::from_result(boot_sync),
     );
 
-    let port = parse_env_u16("SERVER_PORT", DEFAULT_PORT);
+    let port = parse_env("SERVER_PORT", DEFAULT_PORT);
 
     let listener = match tokio::net::TcpListener::bind(("0.0.0.0", port)).await {
         Ok(l) => l,
@@ -242,7 +228,7 @@ pub async fn serve(boot_sync: &Result<Summary, SyncError>) -> i32 {
     // Graceful drain deadline: allows in-flight requests to complete, but with a
     // timeout to ensure we exit before Kubernetes sends SIGKILL. This gives main()
     // time to flush telemetry.
-    let drain_secs = parse_env_u64("GRACEFUL_DRAIN_SECS", DEFAULT_GRACEFUL_DRAIN_SECS);
+    let drain_secs = parse_env("GRACEFUL_DRAIN_SECS", DEFAULT_GRACEFUL_DRAIN_SECS);
     tracing::debug!(drain_secs, "graceful drain timeout configured");
     let drain_timeout = Duration::from_secs(drain_secs);
 
@@ -597,7 +583,12 @@ async fn sync_route(State(state): State<AppState>) -> Response {
 
 async fn status(State(state): State<AppState>) -> Response {
     let last_sync = state.last_sync.lock().unwrap().clone();
-    Json(json!({ "sync_enabled": state.sync_enabled, "last_sync": last_sync })).into_response()
+    Json(json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "sync_enabled": state.sync_enabled,
+        "last_sync": last_sync,
+    }))
+    .into_response()
 }
 
 async fn restart_agent() -> Response {
@@ -633,25 +624,14 @@ fn resolve_path(state: &AppState, path: &str) -> Result<PathBuf, Response> {
     Ok(state.workspace_root.join(rel))
 }
 
-fn safe_rel_path(path: &str) -> Result<PathBuf, String> {
-    let mut rel = PathBuf::new();
-    for seg in path.split('/') {
-        if seg.is_empty() {
-            continue;
-        }
-        if seg == "." || seg == ".." || seg.contains('\\') || seg.contains('\0') {
-            return Err("unsafe path".to_string());
-        }
-        rel.push(seg);
-    }
-    if rel.as_os_str().is_empty() {
-        return Err("empty path".to_string());
-    }
-    Ok(rel)
-}
-
 #[cfg(test)]
 mod tests {
+    // A few async tests hold the process-env lock (`test_env::lock`) across
+    // `.await` to keep env stable for the whole test. `#[tokio::test]` uses a
+    // current-thread runtime, so the non-Send guard never migrates threads and
+    // the lint's deadlock concern doesn't apply here.
+    #![allow(clippy::await_holding_lock)]
+
     use super::*;
     use axum::body::Body;
     use axum::http::Request;
@@ -664,27 +644,6 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let state = AppState::new(dir.clone(), execute_timeout, false, None);
         (app(state), dir)
-    }
-
-    #[test]
-    fn safe_rel_path_accepts_plain_and_nested() {
-        assert_eq!(
-            safe_rel_path("skills/weather").unwrap(),
-            PathBuf::from("skills/weather")
-        );
-        assert_eq!(
-            safe_rel_path("file.txt").unwrap(),
-            PathBuf::from("file.txt")
-        );
-    }
-
-    #[test]
-    fn safe_rel_path_rejects_escapes() {
-        assert!(safe_rel_path("../etc/passwd").is_err());
-        assert!(safe_rel_path("a/../../b").is_err());
-        assert!(safe_rel_path("a/./b").is_err());
-        assert!(safe_rel_path("").is_err());
-        assert!(safe_rel_path("//").is_err());
     }
 
     /// SDK-shaped multipart body (mirrors the TS client's `buildMultipart()`).
@@ -846,10 +805,10 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = resp.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
-            json!({ "sync_enabled": false, "last_sync": null })
-        );
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["sync_enabled"], false);
+        assert_eq!(json["last_sync"], serde_json::json!(null));
+        assert_eq!(json["version"], env!("CARGO_PKG_VERSION"));
     }
 
     #[tokio::test]
@@ -898,6 +857,7 @@ mod tests {
 
     #[tokio::test]
     async fn sync_gate_serializes_concurrent_calls() {
+        let _env = crate::test_env::lock();
         // Clean up environment to ensure sync is disabled (other tests may have set RESOLVE_URL)
         std::env::remove_var("RESOLVE_URL");
 
@@ -1119,6 +1079,7 @@ mod tests {
 
     #[tokio::test]
     async fn sync_route_disabled_returns_501() {
+        let _env = crate::test_env::lock();
         std::env::remove_var("RESOLVE_URL");
         let (app, _dir) = test_app("sync-disabled-route", Duration::from_secs(30));
 
@@ -1135,6 +1096,7 @@ mod tests {
 
     #[tokio::test]
     async fn restart_agent_returns_not_found_when_pattern_not_set() {
+        let _env = crate::test_env::lock();
         std::env::remove_var("AGENT_PROCESS_PATTERN");
         let (app, _dir) = test_app("restart-no-pattern", Duration::from_secs(30));
 
@@ -1151,6 +1113,7 @@ mod tests {
 
     #[tokio::test]
     async fn status_endpoint_shows_sync_disabled() {
+        let _env = crate::test_env::lock();
         std::env::remove_var("RESOLVE_URL");
         let (app, _dir) = test_app("status-sync-disabled", Duration::from_secs(30));
 

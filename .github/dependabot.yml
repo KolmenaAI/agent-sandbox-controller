@@ -1,0 +1,19 @@
+version: 2
+updates:
+  # Keep GitHub Actions current (and, once pinned to SHAs, bumped safely).
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+
+  # Base images in the Dockerfile (rust:*-alpine, alpine:*).
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+
+  # Rust dependency tree — pairs with the daily RustSec audit in ci.yml.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly

@@ -15,12 +15,17 @@
 mod agent;
 mod bundle;
 mod reconcile;
+mod safe_path;
 mod server;
 mod sync;
 mod telemetry;
 
 fn main() {
     let telemetry = telemetry::init();
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        "agent-sandbox-controller starting"
+    );
 
     // Boot sync with retries on upstream (network/control-plane) errors.
     // Disabled and config errors don't retry. For oneshot (Jobs), failures
@@ -35,6 +40,12 @@ fn main() {
     let mode = std::env::var("MODE").unwrap_or_default();
     let mode = mode.trim();
     let is_sidecar = mode == "sidecar";
+    if !mode.is_empty() && !is_sidecar && mode != "oneshot" {
+        tracing::warn!(
+            mode,
+            "unrecognized MODE, defaulting to oneshot (valid: sidecar, oneshot)"
+        );
+    }
     tracing::info!(
         mode = if is_sidecar { "sidecar" } else { "oneshot" },
         "startup mode resolved"
@@ -65,4 +76,21 @@ fn main() {
 
     telemetry.shutdown();
     std::process::exit(exit_code);
+}
+
+/// Process-global lock for tests that mutate shared env vars (`RESOLVE_URL`,
+/// `WORKSPACE_ROOT`, …). `cargo test` runs tests in parallel on one process, so
+/// without serialization one test's `set_var`/`remove_var` races another's read.
+/// Every env-touching test holds this for its duration.
+#[cfg(test)]
+pub(crate) mod test_env {
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    pub fn lock() -> MutexGuard<'static, ()> {
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 }

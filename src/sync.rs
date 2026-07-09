@@ -382,6 +382,7 @@ mod tests {
 
     #[test]
     fn sync_disabled_when_resolve_url_not_set() {
+        let _env = crate::test_env::lock();
         std::env::remove_var("RESOLVE_URL");
         std::env::set_var("RESOLVE_TOKEN", "token");
         std::env::set_var("WORKSPACE_ROOT", "/tmp/test");
@@ -395,6 +396,7 @@ mod tests {
 
     #[test]
     fn sync_disabled_when_resolve_url_empty() {
+        let _env = crate::test_env::lock();
         std::env::set_var("RESOLVE_URL", "   ");
         std::env::set_var("RESOLVE_TOKEN", "token");
         std::env::set_var("WORKSPACE_ROOT", "/tmp/test");
@@ -409,6 +411,7 @@ mod tests {
 
     #[test]
     fn config_error_missing_token() {
+        let _env = crate::test_env::lock();
         std::env::set_var("RESOLVE_URL", "http://example.com/resolve");
         std::env::remove_var("RESOLVE_TOKEN");
         std::env::set_var("WORKSPACE_ROOT", "/tmp/test");
@@ -428,6 +431,7 @@ mod tests {
 
     #[test]
     fn config_error_missing_workspace() {
+        let _env = crate::test_env::lock();
         std::env::set_var("RESOLVE_URL", "http://example.com/resolve");
         std::env::set_var("RESOLVE_TOKEN", "token");
         std::env::remove_var("WORKSPACE_ROOT");
@@ -447,6 +451,7 @@ mod tests {
 
     #[test]
     fn upstream_error_on_network_failure() {
+        let _env = crate::test_env::lock();
         // Use a port that's not listening
         let port = {
             let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -470,6 +475,7 @@ mod tests {
 
     #[test]
     fn config_errors_do_not_retry() {
+        let _env = crate::test_env::lock();
         // Clean up any existing state
         std::env::remove_var("RESOLVE_URL");
         std::env::remove_var("RESOLVE_TOKEN");

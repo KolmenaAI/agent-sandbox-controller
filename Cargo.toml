@@ -19,6 +19,13 @@ opentelemetry = "0.32"
 opentelemetry-appender-tracing = "0.32"
 opentelemetry-otlp = { version = "0.32", default-features = false, features = ["logs", "http-proto", "reqwest-blocking-client", "reqwest-rustls"] }
 opentelemetry_sdk = { version = "0.32", features = ["logs"] }
+# Pinned to 0.12: it downloads bundles over HTTPS with COMPILE-TIME webpki roots
+# (rustls-tls-webpki-roots), so the static musl binary needs no system CA bundle.
+# reqwest 0.13's `rustls` switched to rustls-platform-verifier (the system CA
+# store) — which the CA-less alpine image can't satisfy — so we stay on 0.12 even
+# though opentelemetry-otlp pulls a second reqwest 0.13 for its (in-cluster,
+# usually plaintext) OTLP export. The extra stack is the lesser evil vs. changing
+# the bundle-download trust model.
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls-webpki-roots", "json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

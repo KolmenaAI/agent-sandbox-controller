@@ -34,9 +34,9 @@ kind: Pod
 metadata:
   name: verify-pidshare
 spec:
-  # Set to the runtime class your agent pods use (e.g. kata, gvisor);
-  # omit the line entirely to test the default runtime (runc).
-  runtimeClassName: kata
+  # Defaults to the cluster's default runtime (runc). Uncomment and set to the
+  # runtime class your agent pods use (e.g. kata, gvisor) to test under it.
+  # runtimeClassName: kata
   shareProcessNamespace: true
   restartPolicy: Always # so the killed agent container restarts in place
   initContainers:

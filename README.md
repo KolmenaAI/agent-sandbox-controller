@@ -122,7 +122,7 @@ spec:
   shareProcessNamespace: true
   initContainers:
     - name: sandbox-controller
-      image: agent-sandbox-controller:latest
+      image: ghcr.io/kolmenaai/agent-sandbox-controller:0.1.0 # pin an exact release; no floating :latest is published
       restartPolicy: Always # native sidecar
       securityContext:
         runAsNonRoot: true

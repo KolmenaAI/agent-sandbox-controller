@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -92,25 +92,7 @@ pub fn diff<'a>(
 }
 
 fn validate_target_path(path: &str) -> Result<()> {
-    // Reject absolute paths (leading /)
-    if path.starts_with('/') {
-        bail!("unsafe path: {path}");
-    }
-
-    let mut rel = PathBuf::new();
-    for seg in path.split('/') {
-        if seg.is_empty() {
-            continue;
-        }
-        // Reject . and .. segments, backslashes, and null bytes
-        if seg == "." || seg == ".." || seg.contains('\\') || seg.contains('\0') {
-            bail!("unsafe path: {path}");
-        }
-        rel.push(seg);
-    }
-    if rel.as_os_str().is_empty() {
-        bail!("empty path");
-    }
+    crate::safe_path::safe_rel_path(path).map_err(|m| anyhow::anyhow!("{m}: {path}"))?;
     Ok(())
 }
 

@@ -40,7 +40,12 @@ use crate::sync::{self, SyncError};
 
 const DEFAULT_PORT: u16 = 8888;
 const MAX_UPLOAD_BYTES: usize = 256 * 1024 * 1024; // SDK default MaxUploadSize
+const MAX_EXECUTE_OUTPUT_BYTES: usize = 10 * 1024 * 1024; // 10 MB cap per stream
 const DEFAULT_EXECUTE_TIMEOUT_SECS: u64 = 300;
+// Drain deadline for graceful shutdown. Kubernetes' default termination grace period is 30s;
+// we use 25s to leave time for telemetry flush in main before SIGKILL. Set via
+// GRACEFUL_DRAIN_SECS env var.
+const DEFAULT_GRACEFUL_DRAIN_SECS: u64 = 25;
 
 /// Outcome of one sync attempt, kept for `GET /status`. `ok` reflects the
 /// resolve/reconcile machinery; per-item failures land in `errors` with
@@ -186,14 +191,37 @@ pub async fn serve(boot_sync: &Result<Summary, SyncError>) -> i32 {
         }
     };
     tracing::info!(port, "sidecar listening");
-    match axum::serve(listener, app(state))
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-    {
-        Ok(()) => 0,
-        Err(e) => {
+
+    // Graceful drain deadline: allows in-flight requests to complete, but with a
+    // timeout to ensure we exit before Kubernetes sends SIGKILL. This gives main()
+    // time to flush telemetry.
+    let drain_secs = std::env::var("GRACEFUL_DRAIN_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(DEFAULT_GRACEFUL_DRAIN_SECS);
+    let drain_timeout = Duration::from_secs(drain_secs);
+
+    let serve_result = tokio::time::timeout(
+        drain_timeout,
+        axum::serve(listener, app(state)).with_graceful_shutdown(shutdown_signal()),
+    )
+    .await;
+
+    // Log whether shutdown was clean (completed within drain window) or forced (timeout).
+    match serve_result {
+        Ok(Ok(())) => {
+            tracing::info!("server shutdown complete");
+            0
+        }
+        Ok(Err(e)) => {
             tracing::error!("server error: {e}");
             1
+        }
+        Err(_elapsed) => {
+            tracing::warn!(
+                "graceful drain timeout after {drain_secs}s; forcing shutdown to allow telemetry flush"
+            );
+            0
         }
     }
 }
@@ -219,6 +247,13 @@ async fn shutdown_signal() {
 }
 
 // ── SDK file surface ─────────────────────────────────────────────────────────
+//
+// Note: Upload and download currently buffer entire files in memory (up to
+// MAX_UPLOAD_BYTES). With per-request limits but no concurrency control, N
+// concurrent large uploads could use N × 256MB. Operators should:
+// - Monitor sidecar RSS and alert if it exceeds available memory
+// - Limit concurrent requests at the load balancer or ingress level
+// - Consider streaming implementations for very large files in future
 
 async fn upload(State(state): State<AppState>, mut multipart: Multipart) -> Response {
     let root = state.workspace_root;
@@ -344,6 +379,25 @@ struct ExecBody {
     command: String,
 }
 
+/// Guard that kills a process group on drop, ensuring cleanup even if the
+/// handler is cancelled (client disconnect). The group is also explicitly
+/// killed in success/error paths to avoid orphaned processes.
+#[cfg(unix)]
+struct ProcessGroupGuard {
+    pgid: i32,
+}
+
+#[cfg(unix)]
+impl Drop for ProcessGroupGuard {
+    fn drop(&mut self) {
+        // SIGKILL the process group. This runs on any exit path: timeout,
+        // error, success, or client disconnect/cancellation.
+        unsafe {
+            libc::kill(-self.pgid, libc::SIGKILL);
+        }
+    }
+}
+
 async fn execute(State(state): State<AppState>, Json(body): Json<ExecBody>) -> Response {
     let mut cmd = tokio::process::Command::new("sh");
     cmd.arg("-c")
@@ -379,19 +433,49 @@ async fn execute(State(state): State<AppState>, Json(body): Json<ExecBody>) -> R
         Err(e) => return exec_response("", &format!("spawn failed: {e}"), -1),
     };
     let pid = child.id();
+
+    // Create a guard that kills the process group on any exit (timeout, error,
+    // success, or client disconnect). This ensures no orphaned processes
+    // survive if the handler is cancelled.
+    #[cfg(unix)]
+    let _guard = pid
+        .and_then(|p| i32::try_from(p).ok())
+        .map(|pgid| ProcessGroupGuard { pgid });
+
     match tokio::time::timeout(state.execute_timeout, child.wait_with_output()).await {
-        Ok(Ok(out)) => Json(json!({
-            "stdout": String::from_utf8_lossy(&out.stdout),
-            "stderr": String::from_utf8_lossy(&out.stderr),
-            "exit_code": out.status.code().unwrap_or(-1),
-        }))
-        .into_response(),
+        Ok(Ok(out)) => {
+            // Cap output to prevent unbounded memory usage from chatty commands.
+            // Truncate stdout and stderr if they exceed the limit.
+            let stdout = if out.stdout.len() > MAX_EXECUTE_OUTPUT_BYTES {
+                let mut truncated = out.stdout[..MAX_EXECUTE_OUTPUT_BYTES].to_vec();
+                truncated.extend_from_slice(b"\n[output truncated]\n");
+                truncated
+            } else {
+                out.stdout
+            };
+
+            let stderr = if out.stderr.len() > MAX_EXECUTE_OUTPUT_BYTES {
+                let mut truncated = out.stderr[..MAX_EXECUTE_OUTPUT_BYTES].to_vec();
+                truncated.extend_from_slice(b"\n[output truncated]\n");
+                truncated
+            } else {
+                out.stderr
+            };
+
+            Json(json!({
+                "stdout": String::from_utf8_lossy(&stdout),
+                "stderr": String::from_utf8_lossy(&stderr),
+                "exit_code": out.status.code().unwrap_or(-1),
+            }))
+            .into_response()
+        }
         Ok(Err(e)) => exec_response("", &format!("wait failed: {e}"), -1),
         Err(_elapsed) => {
-            // SIGKILL the process group; kill_on_drop reaps the shell itself.
+            // Timeout: process group will be killed by _guard on drop.
+            // Explicitly kill here for immediate cleanup without waiting for drop.
             #[cfg(unix)]
-            if let Some(pid) = pid.and_then(|p| i32::try_from(p).ok()) {
-                unsafe { libc::kill(-pid, libc::SIGKILL) };
+            if let Some(pgid) = pid.and_then(|p| i32::try_from(p).ok()) {
+                unsafe { libc::kill(-pgid, libc::SIGKILL) };
             }
             exec_response(
                 "",

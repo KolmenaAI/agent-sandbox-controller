@@ -17,7 +17,7 @@ hex = "0.4"
 libc = "0.2"
 opentelemetry = "0.32"
 opentelemetry-appender-tracing = "0.32"
-opentelemetry-otlp = { version = "0.32", default-features = false, features = ["logs", "http-proto", "reqwest-blocking-client"] }
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["logs", "http-proto", "reqwest-blocking-client", "reqwest-rustls"] }
 opentelemetry_sdk = { version = "0.32", features = ["logs"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls-webpki-roots", "json"] }
 serde = { version = "1", features = ["derive"] }

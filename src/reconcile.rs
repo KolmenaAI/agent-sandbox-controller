@@ -55,17 +55,28 @@ pub struct Diff<'a> {
     pub remove: Vec<String>,
 }
 
-/// Pure reconcile diff: desired set vs the manifest we own. Add/update when the
-/// content hash differs; remove owned `targetPath`s that dropped out of the set.
+/// Reconcile diff: desired set vs the manifest we own. Add/update when the
+/// content hash differs, OR when content is missing from the volume (self-heal
+/// damaged workspaces). Remove owned `targetPath`s that dropped out of the set.
 /// Unsafe manifest keys are ignored.
-pub fn diff<'a>(desired: &'a [ResolvedResource], manifest: &Manifest) -> Diff<'a> {
+pub fn diff<'a>(
+    workspace_root: &Path,
+    desired: &'a [ResolvedResource],
+    manifest: &Manifest,
+) -> Diff<'a> {
     let wanted: HashSet<&str> = desired.iter().map(|d| d.target_path.as_str()).collect();
 
     let apply = desired
         .iter()
         .filter(|d| {
-            manifest.get(&d.target_path).map(|m| m.sha256.as_str())
-                != Some(&d.sha256.to_lowercase())
+            let sha_matches = manifest.get(&d.target_path).map(|m| m.sha256.as_str())
+                == Some(&d.sha256.to_lowercase());
+            if !sha_matches {
+                return true; // Hash mismatch: re-place
+            }
+            // Hash matches, but check if content actually exists on volume
+            let target = workspace_root.join(&d.target_path);
+            !target.exists()
         })
         .collect();
 
@@ -134,7 +145,7 @@ pub fn apply_diff(
 ) -> Summary {
     let mut summary = Summary::default();
     let mut next = manifest.clone();
-    let Diff { apply, remove } = diff(desired, manifest);
+    let Diff { apply, remove } = diff(workspace_root, desired, manifest);
 
     for item in apply {
         if let Err(err) = apply_one(client, workspace_root, item) {
@@ -158,12 +169,28 @@ pub fn apply_diff(
 
     for target_path in remove {
         if validate_target_path(&target_path).is_ok() {
-            match fs::remove_dir_all(workspace_root.join(&target_path)) {
-                Ok(()) | Err(_) => {} // tolerate already-gone
+            let target = workspace_root.join(&target_path);
+            match fs::remove_dir_all(&target) {
+                Ok(()) => {
+                    // Successfully removed: forget it from the manifest
+                    next.remove(&target_path);
+                    summary.removed.push(target_path);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    // Already gone (or never existed): safe to forget from manifest
+                    next.remove(&target_path);
+                    summary.removed.push(target_path);
+                }
+                Err(e) => {
+                    // Real error (permissions, in use, I/O error, etc.): keep in manifest
+                    // and report so operator can investigate. Path remains managed and we'll
+                    // retry on next sync.
+                    summary
+                        .errors
+                        .push(format!("{target_path}: remove failed: {e}"));
+                }
             }
         }
-        next.remove(&target_path);
-        summary.removed.push(target_path);
     }
 
     // Persist the reconciled ownership set.
@@ -254,8 +281,12 @@ mod tests {
 
     #[test]
     fn adds_items_absent_from_manifest() {
+        let workspace = std::env::temp_dir().join("test-diff-absent");
+        let _ = fs::remove_dir_all(&workspace);
+        fs::create_dir_all(&workspace).unwrap();
+
         let desired = vec![item("skills/weather", "aaa")];
-        let d = diff(&desired, &Manifest::new());
+        let d = diff(&workspace, &desired, &Manifest::new());
         assert_eq!(
             d.apply
                 .iter()
@@ -268,9 +299,16 @@ mod tests {
 
     #[test]
     fn applies_only_when_hash_changed() {
+        let workspace = std::env::temp_dir().join("test-diff-hash");
+        let _ = fs::remove_dir_all(&workspace);
+        fs::create_dir_all(&workspace).unwrap();
+        // Create the existing content so it "exists" and matches by hash
+        fs::create_dir_all(workspace.join("skills/weather")).unwrap();
+        fs::write(workspace.join("skills/weather/file"), "v1").unwrap();
+
         let m = manifest(&[("skills/weather", "aaa"), ("skills/xlsx", "bbb")]);
         let desired = vec![item("skills/weather", "aaa"), item("skills/xlsx", "ccc")];
-        let d = diff(&desired, &m);
+        let d = diff(&workspace, &desired, &m);
         assert_eq!(
             d.apply
                 .iter()
@@ -283,24 +321,40 @@ mod tests {
 
     #[test]
     fn hash_compare_is_case_insensitive() {
+        let workspace = std::env::temp_dir().join("test-diff-case");
+        let _ = fs::remove_dir_all(&workspace);
+        fs::create_dir_all(&workspace).unwrap();
+        fs::create_dir_all(workspace.join("skills/weather")).unwrap();
+
         let m = manifest(&[("skills/weather", "abcdef")]);
         let desired = vec![item("skills/weather", "ABCDEF")];
-        assert!(diff(&desired, &m).apply.is_empty());
+        assert!(diff(&workspace, &desired, &m).apply.is_empty());
     }
 
     #[test]
     fn removes_owned_paths_no_longer_desired() {
+        let workspace = std::env::temp_dir().join("test-diff-remove");
+        let _ = fs::remove_dir_all(&workspace);
+        fs::create_dir_all(&workspace).unwrap();
+        fs::create_dir_all(workspace.join("skills/weather")).unwrap();
+
         let m = manifest(&[("skills/weather", "aaa"), ("skills/stale", "bbb")]);
         let desired = vec![item("skills/weather", "aaa")];
-        let d = diff(&desired, &m);
+        let d = diff(&workspace, &desired, &m);
         assert!(d.apply.is_empty());
         assert_eq!(d.remove, ["skills/stale"]);
     }
 
     #[test]
     fn never_removes_unowned_paths() {
+        let workspace = std::env::temp_dir().join("test-diff-unowned");
+        let _ = fs::remove_dir_all(&workspace);
+        fs::create_dir_all(&workspace).unwrap();
+
         let desired = vec![item("skills/weather", "aaa")];
-        assert!(diff(&desired, &Manifest::new()).remove.is_empty());
+        assert!(diff(&workspace, &desired, &Manifest::new())
+            .remove
+            .is_empty());
     }
 
     #[test]
@@ -349,13 +403,18 @@ mod tests {
 
     #[test]
     fn ignores_unsafe_manifest_keys_in_diff() {
+        let workspace = std::env::temp_dir().join("test-diff-unsafe-keys");
+        let _ = fs::remove_dir_all(&workspace);
+        fs::create_dir_all(&workspace).unwrap();
+        fs::create_dir_all(workspace.join("skills/weather")).unwrap();
+
         let m = manifest(&[
             ("skills/weather", "aaa"),
             ("../dangerous", "bbb"),
             ("/etc/passwd", "ccc"),
         ]);
         let desired = vec![item("skills/weather", "aaa")];
-        let d = diff(&desired, &m);
+        let d = diff(&workspace, &desired, &m);
         // Only the unowned safe key should be in remove; unsafe ones are ignored
         assert!(d.apply.is_empty());
         assert!(d.remove.is_empty());
@@ -363,10 +422,155 @@ mod tests {
 
     #[test]
     fn removes_unowned_safe_manifest_keys() {
+        let workspace = std::env::temp_dir().join("test-diff-unowned-safe");
+        let _ = fs::remove_dir_all(&workspace);
+        fs::create_dir_all(&workspace).unwrap();
+        fs::create_dir_all(workspace.join("skills/weather")).unwrap();
+
         let m = manifest(&[("skills/weather", "aaa"), ("skills/stale", "bbb")]);
         let desired = vec![item("skills/weather", "aaa")];
-        let d = diff(&desired, &m);
+        let d = diff(&workspace, &desired, &m);
         assert!(d.apply.is_empty());
         assert_eq!(d.remove, ["skills/stale"]);
+    }
+
+    #[test]
+    fn detects_missing_content_and_reapplies() {
+        let workspace = std::env::temp_dir().join("test-diff-missing");
+        let _ = fs::remove_dir_all(&workspace);
+        fs::create_dir_all(&workspace).unwrap();
+        // Create skills/stale but NOT skills/weather (simulates out-of-band deletion)
+
+        // Manifest says both exist with matching hashes
+        let m = manifest(&[("skills/weather", "aaa"), ("skills/stale", "bbb")]);
+        // But we only desire weather
+        let desired = vec![item("skills/weather", "aaa")];
+        let d = diff(&workspace, &desired, &m);
+
+        // Since skills/weather doesn't exist on the volume, it should be re-applied
+        // even though the manifest sha matches
+        assert_eq!(
+            d.apply
+                .iter()
+                .map(|a| a.target_path.as_str())
+                .collect::<Vec<_>>(),
+            ["skills/weather"]
+        );
+        // skills/stale should be removed (dropped from desired set)
+        assert_eq!(d.remove, ["skills/stale"]);
+    }
+}
+
+#[cfg(test)]
+mod apply_diff_tests {
+    use super::*;
+
+    #[test]
+    fn removal_errors_are_reported_and_paths_stay_managed() {
+        let workspace = std::env::temp_dir().join("test-apply-removal-error");
+        let _ = fs::remove_dir_all(&workspace);
+        fs::create_dir_all(&workspace).unwrap();
+
+        // Create a managed skill directory
+        fs::create_dir_all(workspace.join("skills/weather")).unwrap();
+        fs::write(workspace.join("skills/weather/data"), "content").unwrap();
+
+        // Manifest says we own skills/weather
+        let mut manifest = std::collections::HashMap::new();
+        manifest.insert(
+            "skills/weather".to_string(),
+            ManifestEntry {
+                version: "1".into(),
+                sha256: "aaa".to_string(),
+            },
+        );
+
+        // Desired set is empty (we want to remove it)
+        let desired: Vec<ResolvedResource> = vec![];
+
+        // Make the directory read-only to cause removal to fail
+        #[cfg(unix)]
+        {
+            use std::fs::Permissions;
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(workspace.join("skills"), Permissions::from_mode(0o555)).unwrap();
+        }
+
+        // Try to apply (which would remove the read-only directory)
+        let client = reqwest::blocking::Client::new();
+        let summary = apply_diff(&client, &workspace, &desired, &manifest);
+
+        // Restore permissions for cleanup
+        #[cfg(unix)]
+        {
+            use std::fs::Permissions;
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(workspace.join("skills"), Permissions::from_mode(0o755));
+        }
+
+        // The removal should have failed and been reported
+        assert!(
+            !summary.errors.is_empty(),
+            "Should have error for failed removal"
+        );
+        assert!(
+            summary.errors[0].contains("remove failed"),
+            "Error should mention removal: {}",
+            summary.errors[0]
+        );
+
+        // The path should NOT be in the "removed" list (failed removal)
+        assert!(
+            summary.removed.is_empty(),
+            "Failed removal should not be reported as removed"
+        );
+
+        // Verify the path is still in the manifest (not orphaned)
+        let updated_manifest = read_manifest(&workspace);
+        assert!(
+            updated_manifest.contains_key("skills/weather"),
+            "Failed removal should keep path in manifest"
+        );
+    }
+
+    #[test]
+    fn removal_of_missing_content_succeeds() {
+        let workspace = std::env::temp_dir().join("test-apply-missing-removal");
+        let _ = fs::remove_dir_all(&workspace);
+        fs::create_dir_all(&workspace).unwrap();
+
+        // Manifest says we own skills/weather, but it doesn't actually exist
+        let mut manifest = std::collections::HashMap::new();
+        manifest.insert(
+            "skills/weather".to_string(),
+            ManifestEntry {
+                version: "1".into(),
+                sha256: "aaa".to_string(),
+            },
+        );
+
+        // Desired set is empty (we want to remove it)
+        let desired: Vec<ResolvedResource> = vec![];
+
+        // Try to apply (which would remove the missing directory)
+        let client = reqwest::blocking::Client::new();
+        let summary = apply_diff(&client, &workspace, &desired, &manifest);
+
+        // Should succeed (NotFound is treated as already-removed)
+        assert!(
+            summary.errors.is_empty(),
+            "Missing removal should succeed: {:?}",
+            summary.errors
+        );
+
+        // The path should be in the "removed" list
+        assert_eq!(summary.removed, ["skills/weather"]);
+
+        // Verify the path is gone from the manifest
+        let updated_manifest = read_manifest(&workspace);
+        assert!(
+            !updated_manifest.contains_key("skills/weather"),
+            "Removed path should be gone from manifest"
+        );
     }
 }

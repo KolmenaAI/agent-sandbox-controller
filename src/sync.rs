@@ -372,19 +372,113 @@ mod tests {
         );
     }
 
+    // ── SyncError classification tests ──────────────────────────────────────
+
     #[test]
-    fn upstream_errors_retry_with_backoff() {
-        let workspace = test_workspace("retry");
-        // Connection refused — will fail on each attempt.
+    fn sync_disabled_when_resolve_url_not_set() {
+        std::env::remove_var("RESOLVE_URL");
+        std::env::set_var("RESOLVE_TOKEN", "token");
+        std::env::set_var("WORKSPACE_ROOT", "/tmp/test");
+
+        let result = run();
+        assert!(matches!(result, Err(SyncError::Disabled)));
+
+        std::env::remove_var("RESOLVE_TOKEN");
+        std::env::remove_var("WORKSPACE_ROOT");
+    }
+
+    #[test]
+    fn sync_disabled_when_resolve_url_empty() {
+        std::env::set_var("RESOLVE_URL", "   ");
+        std::env::set_var("RESOLVE_TOKEN", "token");
+        std::env::set_var("WORKSPACE_ROOT", "/tmp/test");
+
+        let result = run();
+        assert!(matches!(result, Err(SyncError::Disabled)));
+
+        std::env::remove_var("RESOLVE_URL");
+        std::env::remove_var("RESOLVE_TOKEN");
+        std::env::remove_var("WORKSPACE_ROOT");
+    }
+
+    #[test]
+    fn config_error_missing_token() {
+        std::env::set_var("RESOLVE_URL", "http://example.com/resolve");
+        std::env::remove_var("RESOLVE_TOKEN");
+        std::env::set_var("WORKSPACE_ROOT", "/tmp/test");
+
+        let result = run();
+        assert!(
+            matches!(
+                result,
+                Err(SyncError::Config(ref m)) if m.contains("RESOLVE_TOKEN")
+            ),
+            "Got: {result:?}"
+        );
+
+        std::env::remove_var("RESOLVE_URL");
+        std::env::remove_var("WORKSPACE_ROOT");
+    }
+
+    #[test]
+    fn config_error_missing_workspace() {
+        std::env::set_var("RESOLVE_URL", "http://example.com/resolve");
+        std::env::set_var("RESOLVE_TOKEN", "token");
+        std::env::remove_var("WORKSPACE_ROOT");
+
+        let result = run();
+        assert!(
+            matches!(
+                result,
+                Err(SyncError::Config(ref m)) if m.contains("WORKSPACE_ROOT")
+            ),
+            "Got: {result:?}"
+        );
+
+        std::env::remove_var("RESOLVE_URL");
+        std::env::remove_var("RESOLVE_TOKEN");
+    }
+
+    #[test]
+    fn upstream_error_on_network_failure() {
+        // Use a port that's not listening
         let port = {
             let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             l.local_addr().unwrap().port()
         };
-        std::env::set_var("RESOLVE_URL", format!("http://127.0.0.1:{port}"));
-        std::env::set_var("RESOLVE_TOKEN", "test");
-        std::env::set_var("WORKSPACE_ROOT", workspace.to_str().unwrap());
-        // Calling run_with_retries(2) should try twice and then fail with Upstream error.
-        let err = run_with_retries(2);
-        assert!(matches!(err, Err(SyncError::Upstream(_))));
+
+        std::env::set_var("RESOLVE_URL", format!("http://127.0.0.1:{port}/resolve"));
+        std::env::set_var("RESOLVE_TOKEN", "token");
+        std::env::set_var("WORKSPACE_ROOT", "/tmp/test");
+
+        let result = run();
+        assert!(
+            matches!(result, Err(SyncError::Upstream(_))),
+            "Network failure should be Upstream error, got: {result:?}"
+        );
+
+        std::env::remove_var("RESOLVE_URL");
+        std::env::remove_var("RESOLVE_TOKEN");
+        std::env::remove_var("WORKSPACE_ROOT");
+    }
+
+    #[test]
+    fn config_errors_do_not_retry() {
+        // Missing token is a config error
+        std::env::set_var("RESOLVE_URL", "http://example.com/resolve");
+        std::env::remove_var("RESOLVE_TOKEN");
+        std::env::set_var("WORKSPACE_ROOT", "/tmp/test");
+
+        let result = run_with_retries(3);
+        assert!(
+            matches!(
+                result,
+                Err(SyncError::Config(ref m)) if m.contains("RESOLVE_TOKEN")
+            ),
+            "Config errors should not be retried, got: {result:?}"
+        );
+
+        std::env::remove_var("RESOLVE_URL");
+        std::env::remove_var("WORKSPACE_ROOT");
     }
 }

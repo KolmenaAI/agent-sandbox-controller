@@ -74,3 +74,72 @@ fn find_pid(pattern: &str) -> Option<i32> {
 const fn find_pid(_pattern: &str) -> Option<i32> {
     None // /proc scanning is Linux-only; dev machines just report not-found.
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn restart_config_error_pattern_not_set() {
+        std::env::remove_var("AGENT_PROCESS_PATTERN");
+        let result = restart();
+        assert!(matches!(result, Err(RestartError::Config(m)) if m.contains("not set")));
+    }
+
+    #[test]
+    fn restart_config_error_pattern_empty() {
+        std::env::set_var("AGENT_PROCESS_PATTERN", "   ");
+        let result = restart();
+        let ok = matches!(result, Err(RestartError::Config(_)));
+        std::env::remove_var("AGENT_PROCESS_PATTERN");
+        assert!(ok);
+    }
+
+    #[cfg(target_os = "linux")]
+    mod linux_tests {
+        use super::*;
+
+        #[test]
+        fn find_pid_returns_none_when_no_match() {
+            let pattern = "definitely_not_running_process_xyz_123";
+            let pid = find_pid(pattern);
+            assert_eq!(pid, None);
+        }
+
+        #[test]
+        fn find_pid_excludes_self() {
+            let self_pid = std::process::id() as i32;
+            let pattern = "cargo";
+            let pid = find_pid(pattern);
+
+            if let Some(found) = pid {
+                assert_ne!(found, self_pid, "find_pid must exclude self process");
+            }
+        }
+
+        #[test]
+        fn restart_signal_success() {
+            use std::process::Command;
+
+            let child = Command::new("sleep")
+                .arg("1000")
+                .spawn()
+                .expect("spawn sleep");
+
+            let pid = child.id() as i32;
+            let pattern = "sleep";
+            std::env::set_var("AGENT_PROCESS_PATTERN", pattern);
+
+            std::thread::sleep(std::time::Duration::from_millis(100));
+
+            let result = restart();
+            assert!(
+                matches!(result, Ok(found_pid) if found_pid == pid),
+                "restart should signal the sleep process. Got {:?}",
+                result
+            );
+
+            std::env::remove_var("AGENT_PROCESS_PATTERN");
+        }
+    }
+}

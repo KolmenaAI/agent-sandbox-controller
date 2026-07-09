@@ -855,6 +855,9 @@ mod tests {
 
     #[tokio::test]
     async fn sync_gate_serializes_concurrent_calls() {
+        // Clean up environment to ensure sync is disabled (other tests may have set RESOLVE_URL)
+        std::env::remove_var("RESOLVE_URL");
+
         let (app, _dir) = test_app("sync-serialize", Duration::from_secs(30));
 
         // Spawn multiple sync requests concurrently. With the gate held inside
@@ -880,5 +883,372 @@ mod tests {
         for task in tasks {
             task.await.unwrap();
         }
+    }
+
+    // ── Upload filename validation tests ──────────────────────────────────────
+
+    fn build_multipart(boundary: &str, filename: &str, content: &[u8]) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\nContent-Type: application/octet-stream\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        body.extend_from_slice(content);
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+        body
+    }
+
+    #[tokio::test]
+    async fn upload_rejects_empty_filename() {
+        let (app, _dir) = test_app("empty-filename", Duration::from_secs(30));
+        let boundary = "----test";
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/upload")
+                    .header(
+                        "content-type",
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(Body::from(build_multipart(boundary, "", b"content")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        assert!(
+            String::from_utf8_lossy(&body).contains("plain file name"),
+            "Error should mention 'plain file name'"
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_rejects_slash_in_filename() {
+        let (app, _dir) = test_app("slash-filename", Duration::from_secs(30));
+        let boundary = "----test";
+
+        for bad_filename in &["dir/file.txt", "/etc/passwd", "a/b"] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/upload")
+                        .header(
+                            "content-type",
+                            format!("multipart/form-data; boundary={boundary}"),
+                        )
+                        .body(Body::from(build_multipart(
+                            boundary,
+                            bad_filename,
+                            b"content",
+                        )))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "Should reject filename: {bad_filename}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn upload_rejects_backslash_in_filename() {
+        let (app, _dir) = test_app("backslash-filename", Duration::from_secs(30));
+        let boundary = "----test";
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/upload")
+                    .header(
+                        "content-type",
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(Body::from(build_multipart(
+                        boundary,
+                        "dir\\file.txt",
+                        b"content",
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn upload_rejects_dot_filename() {
+        let (app, _dir) = test_app("dot-filename", Duration::from_secs(30));
+        let boundary = "----test";
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/upload")
+                    .header(
+                        "content-type",
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(Body::from(build_multipart(boundary, ".", b"content")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn upload_rejects_dotdot_filename() {
+        let (app, _dir) = test_app("dotdot-filename", Duration::from_secs(30));
+        let boundary = "----test";
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/upload")
+                    .header(
+                        "content-type",
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(Body::from(build_multipart(boundary, "..", b"content")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn upload_accepts_valid_filenames() {
+        let (app, dir) = test_app("valid-filenames", Duration::from_secs(30));
+        let boundary = "----test";
+
+        for good_filename in &["file.txt", "skill_v1.2.tar.gz", "data-2025.json"] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/upload")
+                        .header(
+                            "content-type",
+                            format!("multipart/form-data; boundary={boundary}"),
+                        )
+                        .body(Body::from(build_multipart(
+                            boundary,
+                            good_filename,
+                            b"test content",
+                        )))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "Should accept valid filename: {good_filename}"
+            );
+
+            // Verify file was written
+            assert!(dir.join(good_filename).exists());
+        }
+    }
+
+    // ── /sync route error mapping tests ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn sync_route_disabled_returns_501() {
+        std::env::remove_var("RESOLVE_URL");
+        let (app, _dir) = test_app("sync-disabled-route", Duration::from_secs(30));
+
+        let resp = app
+            .oneshot(Request::post("/sync").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let body_str = String::from_utf8_lossy(&body);
+        assert!(body_str.contains("sync disabled") || body_str.contains("RESOLVE_URL"));
+    }
+
+    #[tokio::test]
+    async fn restart_agent_returns_not_found_when_pattern_not_set() {
+        std::env::remove_var("AGENT_PROCESS_PATTERN");
+        let (app, _dir) = test_app("restart-no-pattern", Duration::from_secs(30));
+
+        let resp = app
+            .oneshot(Request::post("/restart-agent").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let body_str = String::from_utf8_lossy(&body);
+        assert!(body_str.contains("not set"));
+    }
+
+    #[tokio::test]
+    async fn status_endpoint_shows_sync_disabled() {
+        std::env::remove_var("RESOLVE_URL");
+        let (app, _dir) = test_app("status-sync-disabled", Duration::from_secs(30));
+
+        let resp = app
+            .oneshot(Request::get("/status").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["sync_enabled"], false);
+        assert_eq!(json["last_sync"], serde_json::json!(null));
+    }
+
+    #[tokio::test]
+    async fn health_endpoint_returns_ok() {
+        let (app, _dir) = test_app("health", Duration::from_secs(30));
+
+        let resp = app
+            .oneshot(Request::get("/health").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"ok");
+    }
+
+    #[tokio::test]
+    async fn download_nonexistent_file_returns_404() {
+        let (app, _dir) = test_app("download-missing", Duration::from_secs(30));
+
+        let resp = app
+            .oneshot(
+                Request::get("/download/nonexistent.txt")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn exists_returns_false_for_missing_file() {
+        let (app, _dir) = test_app("exists-missing", Duration::from_secs(30));
+
+        let resp = app
+            .oneshot(
+                Request::get("/exists/nonexistent.txt")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["exists"], false);
+    }
+
+    #[tokio::test]
+    async fn list_empty_directory_returns_empty_array() {
+        let (app, _dir) = test_app("list-empty", Duration::from_secs(30));
+
+        let resp = app
+            .oneshot(Request::get("/list").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let entries: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(entries.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn execute_with_invalid_json_returns_400() {
+        let (app, _dir) = test_app("exec-bad-json", Duration::from_secs(30));
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/execute")
+                    .header("content-type", "application/json")
+                    .body(Body::from("not valid json"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // axum returns 400 for invalid JSON by default
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn execute_returns_exit_code_and_output() {
+        let (app, _dir) = test_app("exec-success", Duration::from_secs(30));
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/execute")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"command":"echo hello"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["exit_code"], 0);
+        assert!(json["stdout"].as_str().unwrap().contains("hello"));
+    }
+
+    #[tokio::test]
+    async fn execute_nonexistent_command_returns_error() {
+        let (app, _dir) = test_app("exec-notfound", Duration::from_secs(30));
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/execute")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"command":"nonexistent_command_xyz_123"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_ne!(json["exit_code"], 0);
     }
 }

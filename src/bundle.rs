@@ -174,4 +174,152 @@ mod tests {
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
     }
+
+    // HTTP error and download tests using real test HTTP servers
+    mod download_tests {
+        use super::*;
+
+        fn spawn_test_server(status: u16, body: Vec<u8>, content_length: Option<u64>) -> u16 {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            listener.set_nonblocking(true).unwrap();
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                rt.block_on(async {
+                    use axum::http::StatusCode;
+                    use axum::response::IntoResponse;
+                    use axum::{routing::get, Router};
+                    let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                    let app = Router::new().route(
+                        "/bundle",
+                        get(move || {
+                            let body = body.clone();
+                            let status = status;
+                            async move {
+                                let status_code =
+                                    StatusCode::from_u16(status).unwrap_or(StatusCode::OK);
+                                let mut resp = (status_code, body).into_response();
+                                if let Some(len) = content_length {
+                                    resp.headers_mut()
+                                        .insert("content-length", len.to_string().parse().unwrap());
+                                }
+                                resp
+                            }
+                        }),
+                    );
+                    let _ = axum::serve(listener, app).await;
+                });
+            });
+            port
+        }
+
+        #[test]
+        fn download_bundle_http_404_error() {
+            let port = spawn_test_server(404, vec![], None);
+            let client = reqwest::blocking::Client::new();
+            let url = format!("http://127.0.0.1:{port}/bundle");
+            let result = download_bundle(&client, &url, 1024 * 1024);
+
+            assert!(result.is_err());
+            let msg = result.unwrap_err().to_string();
+            assert!(msg.contains("404"));
+        }
+
+        #[test]
+        fn download_bundle_http_500_error() {
+            let port = spawn_test_server(500, vec![], None);
+            let client = reqwest::blocking::Client::new();
+            let url = format!("http://127.0.0.1:{port}/bundle");
+            let result = download_bundle(&client, &url, 1024 * 1024);
+
+            assert!(result.is_err());
+            let msg = result.unwrap_err().to_string();
+            assert!(msg.contains("500"));
+        }
+
+        #[test]
+        fn download_bundle_rejects_content_length_oversized() {
+            // Create a body that's actually large to match the Content-Length header
+            let oversized_body = vec![0u8; 26 * 1024 * 1024]; // 26MB body
+            let port = spawn_test_server(
+                200,
+                oversized_body.clone(),
+                Some(oversized_body.len() as u64),
+            );
+            let client = reqwest::blocking::Client::new();
+            let url = format!("http://127.0.0.1:{port}/bundle");
+            let max_bytes = 25 * 1024 * 1024; // 25MB limit
+
+            let result = download_bundle(&client, &url, max_bytes);
+
+            assert!(
+                result.is_err(),
+                "Download should be rejected for oversized bundle"
+            );
+            let msg = result.unwrap_err().to_string();
+            assert!(
+                msg.contains("too large"),
+                "Error should mention 'too large', got: {msg}"
+            );
+        }
+
+        #[test]
+        fn download_bundle_accepts_at_limit() {
+            let body = vec![0u8; 1024]; // 1KB
+            let port = spawn_test_server(200, body, Some(1024));
+            let client = reqwest::blocking::Client::new();
+            let url = format!("http://127.0.0.1:{port}/bundle");
+
+            let result = download_bundle(&client, &url, 1024);
+            assert!(result.is_ok());
+            assert_eq!(result.unwrap().len(), 1024);
+        }
+
+        #[test]
+        fn download_bundle_strips_presigned_url_signature() {
+            let port = spawn_test_server(404, vec![], None);
+            std::thread::sleep(std::time::Duration::from_millis(50)); // Give server time to start
+            let client = reqwest::blocking::Client::new();
+            let url = format!("http://127.0.0.1:{port}/bundle?X-Amz-Signature=supersecrettoken123");
+
+            let result = download_bundle(&client, &url, 1024);
+            assert!(result.is_err(), "Download should fail with 404");
+            let error_msg = result.unwrap_err().to_string();
+
+            // Error message must NOT contain the signature
+            assert!(
+                !error_msg.contains("X-Amz-Signature"),
+                "Error should not contain signature parameter: {error_msg}"
+            );
+            assert!(
+                !error_msg.contains("supersecrettoken123"),
+                "Error should not contain token: {error_msg}"
+            );
+
+            // Should mention the download attempt and either the URL or the HTTP status
+            assert!(
+                error_msg.contains("download") || error_msg.contains("404"),
+                "Error should describe the download failure: {error_msg}"
+            );
+        }
+
+        #[test]
+        fn download_bundle_streaming_cap() {
+            // Create a body that exceeds limit when streamed
+            let oversized = vec![0u8; 2 * 1024 * 1024]; // 2MB
+            let port = spawn_test_server(200, oversized, None);
+            let client = reqwest::blocking::Client::new();
+            let url = format!("http://127.0.0.1:{port}/bundle");
+            let max_bytes = 1024 * 1024; // 1MB limit
+
+            let result = download_bundle(&client, &url, max_bytes);
+
+            assert!(result.is_err());
+            let msg = result.unwrap_err().to_string();
+            assert!(msg.contains("too large"));
+        }
+    }
 }

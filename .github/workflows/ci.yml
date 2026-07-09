@@ -7,7 +7,7 @@ on:
   pull_request:
 
 env:
-  # Override in repo settings if you publish elsewhere (e.g. a private Harbor).
+  # Public image on GHCR (docker/metadata-action lowercases the repo slug).
   IMAGE: ghcr.io/${{ github.repository }}
 
 jobs:
@@ -29,16 +29,26 @@ jobs:
       - run: pre-commit run --all-files --show-diff-on-failure
       - run: cargo test
 
-  image:
-    # Build + push the image on main and tags only.
-    if: github.event_name == 'push'
+  release:
+    # A release is a `vX.Y.Z` tag — and ONLY that. No edge/latest/dev/prod
+    # floating tags: the image is published at the exact version and consumers
+    # pin it. Pushing the image + creating the GitHub Release are the release.
+    if: startsWith(github.ref, 'refs/tags/v')
     needs: check
     runs-on: ubuntu-latest
     permissions:
-      contents: read
-      packages: write
+      contents: write # create the GitHub Release
+      packages: write # push the image to GHCR
     steps:
       - uses: actions/checkout@v4
+      # The tag is the source of truth for the version. Refuse to release if
+      # Cargo.toml disagrees, so an image can never ship a mismatched version.
+      - name: Verify Cargo.toml version matches the tag
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          crate="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')"
+          echo "tag=$tag  cargo=$crate"
+          [ "$tag" = "$crate" ] || { echo "::error::tag v$tag != Cargo.toml version $crate"; exit 1; }
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
@@ -49,10 +59,8 @@ jobs:
         id: meta
         with:
           images: ${{ env.IMAGE }}
-          tags: |
-            type=ref,event=branch
-            type=semver,pattern={{version}}
-            type=sha
+          # Exactly the release version — e.g. tag v0.1.0 → image :0.1.0.
+          tags: type=semver,pattern={{version}}
       - uses: docker/build-push-action@v6
         with:
           context: .
@@ -61,3 +69,6 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true

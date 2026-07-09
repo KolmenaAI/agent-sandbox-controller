@@ -13,7 +13,7 @@ cargo clippy --all-targets -- -D warnings   # CI treats clippy warnings as error
 cargo build --release                       # size-optimized static binary (opt-level=z, LTO, panic=abort)
 ```
 
-CI (`.github/workflows/ci.yml`) runs `pre-commit run --all-files` plus `cargo test` on every PR; pushes to main/tags additionally build and push the Docker image to GHCR.
+CI (`.github/workflows/ci.yml`) runs `pre-commit run --all-files` plus `cargo test` on every PR/push. A release is a `vX.Y.Z` git tag (and only that): the `release` job verifies `Cargo.toml` matches the tag, then publishes the image to GHCR at the exact version (`ghcr.io/<owner>/agent-sandbox-controller:X.Y.Z` — no floating edge/latest tags) and creates a GitHub Release. Consumers pin the version.
 
 Pre-commit hooks (`.pre-commit-config.yaml`) run rustfmt, cargo check, and clippy plus generic hygiene checks; set up with `pre-commit install`. Clippy runs at `pedantic` + `nursery` strictness via `[lints.clippy]` in Cargo.toml (warn level — the `-D warnings` flag promotes to errors).
 
@@ -22,7 +22,7 @@ Pre-commit hooks (`.pre-commit-config.yaml`) run rustfmt, cargo check, and clipp
 A small, agent-agnostic control binary that runs **resident in every agent pod** (as a native sidecar) or as an initContainer/Job (oneshot). It has two responsibilities:
 
 1. **Declarative resource sync** — resolve the agent's desired resource set from the control plane (`GET RESOLVE_URL` with bearer `RESOLVE_TOKEN`), then reconcile the workspace volume: download each bundle (presigned URL), verify sha256, extract the tar.gz into `WORKSPACE_ROOT/{targetPath}`.
-1. **Sandbox-runtime HTTP API** (sidecar mode, port 8888) — the file/command contract that agent-sandbox client SDKs expect (`/upload`, `/download`, `/list`, `/exists`, `/execute`), plus `/sync`, `/restart-agent`, and `/health`.
+2. **Sandbox-runtime HTTP API** (sidecar mode, port 8888) — the file/command contract that agent-sandbox client SDKs expect (`/upload`, `/download`, `/list`, `/exists`, `/execute`), plus `/sync`, `/restart-agent`, and `/health`.
 
 Binary size and RSS matter (it runs in every pod) — hence the aggressive release profile, `worker_threads(2)` tokio runtime, and blocking `reqwest` for the sync path.
 

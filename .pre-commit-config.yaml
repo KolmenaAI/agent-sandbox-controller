@@ -31,7 +31,7 @@ repos:
         name: Forbid binaries https://github.com/jumanjihouse/pre-commit-hooks#forbid-binary .
       - id: markdownlint # Configure in .mdlrc
         name: Check markdown files https://github.com/jumanjihouse/pre-commit-hooks#markdownlint .
-        args: [-r, "~MD013,~MD004,~MD026,~MD033"]
+        args: [-r, "~MD013,~MD004,~MD026,~MD033,~MD029"]
   - repo: local
     hooks:
       - id: fmt

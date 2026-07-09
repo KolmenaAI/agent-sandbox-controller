@@ -1,0 +1,59 @@
+exclude: ^(target/.*|Cargo\.lock)$
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+        name: Trim Trailing Whitespace https://github.com/pre-commit/pre-commit-hooks#trailing-whitespace .
+      - id: end-of-file-fixer
+        name: Fix End of Files https://github.com/pre-commit/pre-commit-hooks#end-of-file-fixer .
+      - id: check-added-large-files
+        name: Check large files maxkb=4000 https://github.com/pre-commit/pre-commit-hooks#check-added-large-files .
+        args: [--maxkb=4000]
+      - id: check-yaml
+        name: Check Yaml https://github.com/pre-commit/pre-commit-hooks#check-yaml .
+      - id: check-case-conflict
+        name: Check for case conflicts https://github.com/pre-commit/pre-commit-hooks#check-case-conflict .
+      - id: check-executables-have-shebangs
+        name: Check that executables have shebangs https://github.com/pre-commit/pre-commit-hooks#check-executables-have-shebangs .
+      - id: check-merge-conflict
+        name: Check for merge conflicts https://github.com/pre-commit/pre-commit-hooks#check-merge-conflict .
+      - id: check-symlinks
+      - id: check-vcs-permalinks
+      - id: detect-private-key
+      - id: mixed-line-ending
+        name: Mixed line ending https://github.com/pre-commit/pre-commit-hooks#mixed-line-ending .
+        args: [--fix, lf]
+  - repo: https://github.com/jumanjihouse/pre-commit-hooks
+    rev: 3.0.0
+    hooks:
+      - id: forbid-binary
+        name: Forbid binaries https://github.com/jumanjihouse/pre-commit-hooks#forbid-binary .
+      - id: markdownlint # Configure in .mdlrc
+        name: Check markdown files https://github.com/jumanjihouse/pre-commit-hooks#markdownlint .
+        args: [-r, "~MD013,~MD004,~MD026,~MD033"]
+  - repo: local
+    hooks:
+      - id: fmt
+        name: rustfmt https://github.com/rust-lang/rustfmt/blob/master/README.md .
+        description: Format files with cargo fmt.
+        entry: cargo fmt
+        language: system
+        types: [rust]
+        args: ['--']
+      - id: cargo-check
+        name: cargo check https://doc.rust-lang.org/cargo/commands/cargo-check.html .
+        description: Check a local package and all of its dependencies for errors.
+        entry: cargo check
+        language: system
+        types: [rust]
+        pass_filenames: false
+        args: ['--all-targets']
+      - id: cargo-clippy
+        name: cargo clippy https://github.com/rust-lang/rust-clippy .
+        description: A collection of lints to catch common mistakes and improve your Rust code.
+        entry: cargo clippy
+        language: system
+        types: [rust]
+        pass_filenames: false
+        args: ['--all-targets', '--', '-D', 'warnings']

@@ -1,0 +1,42 @@
+[package]
+name = "agent-sandbox-controller"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Generic, agent-agnostic sandbox-side controller: reconciles an agent's declared resources (skills, …) onto its workspace volume and exposes the sandbox-runtime HTTP API (upload/download/list/exists/execute + sync/restart-agent)."
+
+# Everything is compiled in; capabilities are armed by env at runtime instead of
+# cargo features, so one image serves every deployment shape:
+#   RESOLVE_URL set            → declarative sync enabled (else disabled)
+#   OTEL_EXPORTER_OTLP_ENDPOINT set → OTLP log export of WARN+ (else stdout only)
+[dependencies]
+anyhow = "1"
+axum = { version = "0.8", features = ["multipart"] }
+flate2 = "1"
+hex = "0.4"
+libc = "0.2"
+opentelemetry = "0.32"
+opentelemetry-appender-tracing = "0.32"
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["logs", "http-proto", "reqwest-blocking-client"] }
+opentelemetry_sdk = { version = "0.32", features = ["logs"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls-webpki-roots", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tar = "0.4"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tower-http = { version = "0.7", features = ["trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }
+
+# Small, fast, static binary — this runs as a resident sidecar in every agent pod.
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

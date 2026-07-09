@@ -1,0 +1,114 @@
+# Smoke test for the /restart-agent mechanism on YOUR cluster/runtime — run
+# this before adopting the sidecar. Verifies:
+#
+#   1. `shareProcessNamespace: true` works under your runtimeClassName
+#      (the sidecar can SEE the agent container's process).
+#   2. A native sidecar (initContainer + restartPolicy: Always) is accepted
+#      and runs (requires Kubernetes >= 1.29).
+#   3. A non-root uid-matched sidecar can SIGTERM the agent process
+#      (kernel same-uid signal rule — no CAP_KILL needed).
+#   4. The kubelet restarts JUST the agent container in place: `agent`
+#      RESTARTS increments, the pod itself is not recreated.
+#
+# Verified to pass under runc, Kata Containers, and gVisor.
+#
+# Run:
+#   kubectl -n <your-namespace> apply -f verify-pidshare.yaml
+#   kubectl -n <your-namespace> logs -f verify-pidshare -c controller
+#   kubectl -n <your-namespace> get pod verify-pidshare -w   # agent RESTARTS -> 1
+#
+# Expected controller log sequence:
+#   VISIBLE: agent process pid=<N>       (assumption 1 holds)
+#   KILL OK: sent SIGTERM to <N>         (assumption 3 holds)
+#   RESTARTED IN PLACE: pid <N> -> <M>   (assumption 4 holds)
+#   VERIFY PASS
+# Failure signatures:
+#   "FAIL: agent process never became visible"  -> shareProcessNamespace unsupported by the runtime
+#   "FAIL: kill error"                          -> signal permission problem (uid/capability)
+#   pod rejected on apply                        -> no native-sidecar support (k8s < 1.29)
+#
+# Cleanup:
+#   kubectl -n <your-namespace> delete pod verify-pidshare
+apiVersion: v1
+kind: Pod
+metadata:
+  name: verify-pidshare
+spec:
+  # Set to the runtime class your agent pods use (e.g. kata, gvisor);
+  # omit the line entirely to test the default runtime (runc).
+  runtimeClassName: kata
+  shareProcessNamespace: true
+  restartPolicy: Always # so the killed agent container restarts in place
+  initContainers:
+    # Stand-in for agent-sandbox-controller: native sidecar, non-root,
+    # PodSecurity `restricted`-compliant.
+    - name: controller
+      image: busybox:1.37
+      restartPolicy: Always
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        allowPrivilegeEscalation: false
+        capabilities: { drop: [ALL] }
+        seccompProfile: { type: RuntimeDefault }
+      command: ['/bin/sh', '-c']
+      args:
+        - |
+          echo "controller up: pid=$$ uid=$(id -u)"
+          find_agent() { ps | grep 'sleep 314159' | grep -v grep | awk '{print $1}' | head -n1; }
+
+          i=0
+          until pid=$(find_agent); [ -n "$pid" ]; do
+            i=$((i+1))
+            if [ "$i" -gt 30 ]; then
+              echo "FAIL: agent process never became visible — shareProcessNamespace unsupported by the runtime"
+              echo "ps output:"; ps
+              sleep 3600; exit 1
+            fi
+            sleep 2
+          done
+          echo "VISIBLE: agent process pid=$pid"
+
+          if kill -TERM "$pid"; then
+            echo "KILL OK: sent SIGTERM to $pid"
+          else
+            echo "FAIL: kill error (permission?) — uid mismatch or missing capability"
+            sleep 3600; exit 1
+          fi
+
+          i=0
+          until newpid=$(find_agent); [ -n "$newpid" ] && [ "$newpid" != "$pid" ]; do
+            i=$((i+1))
+            if [ "$i" -gt 45 ]; then
+              echo "FAIL: agent did not come back — check pod events (container restart expected)"
+              sleep 3600; exit 1
+            fi
+            sleep 2
+          done
+          echo "RESTARTED IN PLACE: pid $pid -> $newpid"
+          echo "VERIFY PASS"
+          sleep 3600
+      resources:
+        requests: { cpu: 10m, memory: 16Mi }
+        limits: { cpu: 100m, memory: 64Mi }
+  containers:
+    # Stand-in for the agent, uid-matched with the controller. Distinctive argv
+    # so the controller can find it: "sleep 314159".
+    - name: agent
+      image: busybox:1.37
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        allowPrivilegeEscalation: false
+        capabilities: { drop: [ALL] }
+        seccompProfile: { type: RuntimeDefault }
+      command: ['/bin/sh', '-c']
+      args:
+        - |
+          echo "agent up: pid=$$ uid=$(id -u) at $(date)"
+          exec sleep 314159
+      resources:
+        requests: { cpu: 10m, memory: 16Mi }
+        limits: { cpu: 100m, memory: 64Mi }

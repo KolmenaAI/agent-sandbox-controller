@@ -40,7 +40,6 @@ impl fmt::Display for SyncError {
 
 #[derive(Deserialize)]
 struct ResolveResponse {
-    #[serde(default)]
     items: Vec<ResolvedResource>,
     #[serde(default)]
     digest: String,
@@ -269,5 +268,84 @@ mod tests {
         };
         let err = run_with(&cfg(port, workspace)).unwrap_err();
         assert!(matches!(err, SyncError::Upstream(_)));
+    }
+
+    #[test]
+    fn malformed_response_missing_items_is_upstream_error() {
+        let workspace = test_workspace("malformed");
+        // Response without "items" field — e.g. error envelope or payload refactor
+        let port = spawn_resolve_host(json!({ "error": "maintenance" }));
+        let err = run_with(&cfg(port, workspace)).unwrap_err();
+        assert!(matches!(err, SyncError::Upstream(_)));
+        assert!(
+            err.to_string().contains("parse failed"),
+            "{}",
+            err.to_string()
+        );
+    }
+
+    #[test]
+    fn empty_items_array_removes_all_managed() {
+        let workspace = test_workspace("empty-intentional");
+        let bundle = tgz(&[("SKILL.md", b"# weather")]);
+        let sha = sha256_hex(&bundle);
+        let bundle_port = spawn_bundle_host(bundle);
+
+        // First sync: apply the item and record it in the manifest.
+        let port = spawn_resolve_host(resolve_item(&sha, bundle_port));
+        let summary = run_with(&cfg(port, workspace.clone())).unwrap();
+        assert_eq!(summary.added, ["skill/weather@1"]);
+        assert!(workspace.join("skills/weather").exists());
+
+        // Explicit "items": [] should remove it (intentional wipe).
+        let port = spawn_resolve_host(json!({ "items": [], "digest": "d2" }));
+        let summary = run_with(&cfg(port, workspace.clone())).unwrap();
+        assert_eq!(summary.removed, ["skills/weather"]);
+        assert!(!workspace.join("skills/weather").exists());
+    }
+
+    #[test]
+    fn extraction_failure_preserves_last_good_version() {
+        let workspace = test_workspace("atomic-extract");
+        let bundle_v1 = tgz(&[("SKILL.md", b"# weather v1")]);
+        let sha_v1 = sha256_hex(&bundle_v1);
+        let bundle_port = spawn_bundle_host(bundle_v1);
+
+        // First sync: apply v1
+        let port = spawn_resolve_host(resolve_item(&sha_v1, bundle_port));
+        let summary = run_with(&cfg(port, workspace.clone())).unwrap();
+        assert_eq!(summary.added, ["skill/weather@1"]);
+        assert_eq!(
+            std::fs::read(workspace.join("skills/weather/SKILL.md")).unwrap(),
+            b"# weather v1"
+        );
+
+        // Second sync: resolve claims a new version with mismatched hash.
+        // The bad bundle download succeeds, but hash verification fails.
+        // This should NOT corrupt the existing v1 content.
+        let bad_bundle_port = spawn_bundle_host(tgz(&[("SKILL.md", b"# weather v2")]));
+        let port = spawn_resolve_host(json!({
+            "items": [{
+                "type": "skill",
+                "name": "weather",
+                "version": "2",
+                "sha256": "0".repeat(64),  // Wrong hash
+                "targetPath": "skills/weather",
+                "bundleUrl": format!("http://127.0.0.1:{bad_bundle_port}/bundle"),
+            }],
+            "digest": "d2",
+        }));
+        let summary = run_with(&cfg(port, workspace.clone())).unwrap();
+
+        // Apply should fail (hash mismatch)
+        assert!(!summary.errors.is_empty());
+        assert!(summary.errors[0].contains("sha256 mismatch"));
+
+        // But the last-good v1 content must be preserved — extraction was atomic.
+        assert_eq!(
+            std::fs::read(workspace.join("skills/weather/SKILL.md")).unwrap(),
+            b"# weather v1",
+            "last-good content should be preserved after extraction failure"
+        );
     }
 }

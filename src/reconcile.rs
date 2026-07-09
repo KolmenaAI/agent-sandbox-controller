@@ -7,8 +7,9 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::bundle::{download_bundle, extract_tgz, sha256_hex};
 
@@ -56,6 +57,7 @@ pub struct Diff<'a> {
 
 /// Pure reconcile diff: desired set vs the manifest we own. Add/update when the
 /// content hash differs; remove owned `targetPath`s that dropped out of the set.
+/// Unsafe manifest keys are ignored.
 pub fn diff<'a>(desired: &'a [ResolvedResource], manifest: &Manifest) -> Diff<'a> {
     let wanted: HashSet<&str> = desired.iter().map(|d| d.target_path.as_str()).collect();
 
@@ -69,11 +71,34 @@ pub fn diff<'a>(desired: &'a [ResolvedResource], manifest: &Manifest) -> Diff<'a
 
     let remove = manifest
         .keys()
-        .filter(|tp| !wanted.contains(tp.as_str()))
+        .filter(|tp| !wanted.contains(tp.as_str()) && validate_target_path(tp).is_ok())
         .cloned()
         .collect();
 
     Diff { apply, remove }
+}
+
+fn validate_target_path(path: &str) -> Result<()> {
+    // Reject absolute paths (leading /)
+    if path.starts_with('/') {
+        bail!("unsafe path: {path}");
+    }
+
+    let mut rel = PathBuf::new();
+    for seg in path.split('/') {
+        if seg.is_empty() {
+            continue;
+        }
+        // Reject . and .. segments, backslashes, and null bytes
+        if seg == "." || seg == ".." || seg.contains('\\') || seg.contains('\0') {
+            bail!("unsafe path: {path}");
+        }
+        rel.push(seg);
+    }
+    if rel.as_os_str().is_empty() {
+        bail!("empty path");
+    }
+    Ok(())
 }
 
 fn manifest_path(workspace_root: &Path) -> PathBuf {
@@ -132,8 +157,10 @@ pub fn apply_diff(
     }
 
     for target_path in remove {
-        match fs::remove_dir_all(workspace_root.join(&target_path)) {
-            Ok(()) | Err(_) => {} // tolerate already-gone
+        if validate_target_path(&target_path).is_ok() {
+            match fs::remove_dir_all(workspace_root.join(&target_path)) {
+                Ok(()) | Err(_) => {} // tolerate already-gone
+            }
         }
         next.remove(&target_path);
         summary.removed.push(target_path);
@@ -151,6 +178,7 @@ fn apply_one(
     workspace_root: &Path,
     item: &ResolvedResource,
 ) -> Result<()> {
+    validate_target_path(&item.target_path)?;
     let bytes = download_bundle(client, &item.bundle_url, BUNDLE_MAX_BYTES)?;
     let got = sha256_hex(&bytes);
     let want = item.sha256.to_lowercase();
@@ -159,13 +187,38 @@ fn apply_one(
     }
 
     let target = workspace_root.join(&item.target_path);
-    // Clear any existing entry — could be a stale managed dir or a bundled
-    // symlink an agent-side installer created — before extracting the real folder.
-    if target.symlink_metadata().is_ok() && fs::remove_dir_all(&target).is_err() {
-        let _ = fs::remove_file(&target);
+    // Extract to a temp dir first; only atomically swap on success. This ensures
+    // extraction failure (disk full, corrupt tar) doesn't leave partial content
+    // or delete the last-good version.
+    let tmp_name = format!(".extracted-{}", Uuid::new_v4());
+    let tmp_dir = workspace_root.join(&tmp_name);
+    fs::create_dir_all(&tmp_dir).with_context(|| format!("mkdir {}", tmp_dir.display()))?;
+
+    // Extract into temp directory. If this fails, the temp dir will be cleaned
+    // up below and the target remains untouched.
+    if let Err(e) = extract_tgz(
+        &bytes,
+        &tmp_dir,
+        BUNDLE_MAX_FILES,
+        BUNDLE_MAX_UNPACKED_BYTES,
+    ) {
+        let _ = fs::remove_dir_all(&tmp_dir);
+        return Err(e);
     }
-    fs::create_dir_all(&target).with_context(|| format!("mkdir {}", target.display()))?;
-    extract_tgz(&bytes, &target, BUNDLE_MAX_FILES, BUNDLE_MAX_UNPACKED_BYTES)?;
+
+    // Extraction succeeded. Atomically swap: remove old target (if any), then
+    // rename temp to target. The rename is atomic on POSIX.
+    if target.symlink_metadata().is_ok() {
+        fs::remove_dir_all(&target)
+            .or_else(|_| fs::remove_file(&target))
+            .with_context(|| format!("remove old {}", target.display()))?;
+    }
+    // Ensure parent directory of target exists before renaming.
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("mkdir parent {}", parent.display()))?;
+    }
+    fs::rename(&tmp_dir, &target)
+        .with_context(|| format!("rename {} to {}", tmp_dir.display(), target.display()))?;
     Ok(())
 }
 
@@ -248,5 +301,72 @@ mod tests {
     fn never_removes_unowned_paths() {
         let desired = vec![item("skills/weather", "aaa")];
         assert!(diff(&desired, &Manifest::new()).remove.is_empty());
+    }
+
+    #[test]
+    fn validates_target_path_rejects_absolute() {
+        // Absolute paths should be rejected even if they appear relative after join
+        assert!(validate_target_path("/etc/passwd").is_err());
+    }
+
+    #[test]
+    fn validates_target_path_rejects_parent_traversal() {
+        assert!(validate_target_path("../etc/passwd").is_err());
+        assert!(validate_target_path("a/../../b").is_err());
+        assert!(validate_target_path("skills/..").is_err());
+    }
+
+    #[test]
+    fn validates_target_path_rejects_dot_segments() {
+        assert!(validate_target_path("a/./b").is_err());
+        assert!(validate_target_path(".").is_err());
+        assert!(validate_target_path("./file").is_err());
+    }
+
+    #[test]
+    fn validates_target_path_rejects_empty() {
+        assert!(validate_target_path("").is_err());
+        assert!(validate_target_path("//").is_err());
+    }
+
+    #[test]
+    fn validates_target_path_rejects_null_bytes() {
+        assert!(validate_target_path("file\0name").is_err());
+    }
+
+    #[test]
+    fn validates_target_path_rejects_backslash() {
+        assert!(validate_target_path("file\\path").is_err());
+    }
+
+    #[test]
+    fn validates_target_path_accepts_safe_paths() {
+        assert!(validate_target_path("skills/weather").is_ok());
+        assert!(validate_target_path("file.txt").is_ok());
+        assert!(validate_target_path("a/b/c/d").is_ok());
+        assert!(validate_target_path("skills-v1_2.3").is_ok());
+    }
+
+    #[test]
+    fn ignores_unsafe_manifest_keys_in_diff() {
+        let m = manifest(&[
+            ("skills/weather", "aaa"),
+            ("../dangerous", "bbb"),
+            ("/etc/passwd", "ccc"),
+        ]);
+        let desired = vec![item("skills/weather", "aaa")];
+        let d = diff(&desired, &m);
+        // Only the unowned safe key should be in remove; unsafe ones are ignored
+        assert!(d.apply.is_empty());
+        assert!(d.remove.is_empty());
+    }
+
+    #[test]
+    fn removes_unowned_safe_manifest_keys() {
+        let m = manifest(&[("skills/weather", "aaa"), ("skills/stale", "bbb")]);
+        let desired = vec![item("skills/weather", "aaa")];
+        let d = diff(&desired, &m);
+        assert!(d.apply.is_empty());
+        assert_eq!(d.remove, ["skills/stale"]);
     }
 }

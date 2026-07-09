@@ -54,7 +54,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v3
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@v7
         with:
           context: .
           push: false
@@ -71,7 +71,7 @@ jobs:
       - uses: docker/setup-buildx-action@v3
 
       - name: Build image for testing
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           load: true
@@ -149,7 +149,7 @@ jobs:
           images: ${{ env.IMAGE }}
           # Exactly the release version — e.g. tag v0.1.0 → image :0.1.0.
           tags: type=semver,pattern={{version}}
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@v7
         with:
           context: .
           # Multi-arch so the sidecar runs on amd64 and arm64 nodes. arm64 builds

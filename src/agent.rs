@@ -3,6 +3,7 @@
 //! processes in /proc and can SIGTERM the agent — the kubelet then restarts
 //! just that container in place (no pod reschedule, no image pull).
 
+#[derive(Debug)]
 pub enum RestartError {
     /// `AGENT_PROCESS_PATTERN` not configured — not retryable.
     Config(String),
@@ -36,7 +37,7 @@ pub fn restart() -> Result<i32, RestartError> {
 
 #[cfg(target_os = "linux")]
 fn find_pid(pattern: &str) -> Option<i32> {
-    let self_pid = std::process::id() as i32;
+    let self_pid = std::process::id().cast_signed();
     // Lowest matching PID: if the agent forked children with the same argv[0],
     // the lowest is most likely the container's root process — SIGTERMing a
     // child would not trigger the container restart.

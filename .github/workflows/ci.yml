@@ -22,7 +22,7 @@ jobs:
       # the same compiler as local builds and the Dockerfile.
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: ~/.cache/pre-commit
           key: pre-commit-${{ hashFiles('.pre-commit-config.yaml') }}

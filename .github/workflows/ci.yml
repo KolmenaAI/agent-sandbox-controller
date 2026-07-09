@@ -104,44 +104,28 @@ jobs:
           docker run --rm --entrypoint sh controller:smoke-test \
             -c 'test -x /usr/local/bin/agent-sandbox-controller'
 
-      - name: Test /health endpoint
+      - name: Test /health and /status endpoints
         run: |
-          # Start container with necessary environment
+          # MODE=sidecar actually starts the HTTP server — the default (oneshot)
+          # runs the boot sync and exits, so no endpoint would ever answer.
           docker run -d --name controller \
+            -e MODE=sidecar \
             -e WORKSPACE_ROOT=/tmp/workspace \
             -p 8888:8888 \
             controller:smoke-test
+          trap 'docker rm -f controller >/dev/null 2>&1 || true' EXIT
 
-          # Wait for startup
-          sleep 2
+          # Poll /health until the server is up (it answers only after boot sync).
+          for i in $(seq 1 20); do
+            curl -sf http://localhost:8888/health >/dev/null && break
+            if [ "$i" = 20 ]; then echo "::error::/health never came up"; docker logs controller; exit 1; fi
+            sleep 1
+          done
 
-          # Test health endpoint responds
-          if ! curl -sf http://localhost:8888/health > /dev/null; then
-            echo "::error::Health endpoint failed"
-            docker logs controller
-            exit 1
-          fi
-
-          # Cleanup
-          docker stop controller
-
-      - name: Test /status endpoint
-        run: |
-          docker run -d --name controller \
-            -e WORKSPACE_ROOT=/tmp/workspace \
-            -p 8888:8888 \
-            controller:smoke-test
-
-          sleep 2
-
-          # Test status endpoint returns valid JSON with sync_enabled field
           STATUS=$(curl -sf http://localhost:8888/status)
-          if ! echo "$STATUS" | grep -q "sync_enabled"; then
-            echo "::error::Status endpoint missing sync_enabled"
-            exit 1
-          fi
-
-          docker stop controller
+          echo "status: $STATUS"
+          echo "$STATUS" | grep -q '"sync_enabled"' || { echo "::error::/status missing sync_enabled"; exit 1; }
+          echo "$STATUS" | grep -q '"version"'      || { echo "::error::/status missing version"; exit 1; }
 
   release:
     # A release is a `vX.Y.Z` tag — and ONLY that. No edge/latest/dev/prod

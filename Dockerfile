@@ -1,7 +1,7 @@
 # Static musl build → minimal alpine. Alpine (not distroless) because the
 # /execute endpoint needs `sh` (busybox); still ~10 MB total. The binary runs as
 # a resident sidecar in every agent pod, so size + RSS matter.
-FROM rust:1.94-alpine AS build
+FROM rust:1.96-alpine AS build
 
 RUN apk add --no-cache musl-dev
 WORKDIR /app

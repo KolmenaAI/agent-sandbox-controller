@@ -44,14 +44,33 @@ File paths are relative to `WORKSPACE_ROOT`; traversal is rejected.
 | `GET /download/{path}` | `Files.read` | file bytes |
 | `GET /list/{path}` | `Files.list` | `[{name, size, type: "file"\|"directory", mod_time}]` |
 | `GET /exists/{path}` | `Files.exists` | `{exists: bool}` |
-| `POST /execute` | `Commands.run` | `{command}` → `sh -c` → `{stdout, stderr, exit_code}` |
-| `POST /sync` | — | resolve → reconcile the workspace (one transfer from the object store — skips the download-to-control-plane + upload double hop); returns `{changed, added, updated, removed, errors}` |
+| `POST /execute` | `Commands.run` | `{command}` → `sh -c` with the workspace as cwd → `{stdout, stderr, exit_code}`; killed (whole process group) after `EXECUTE_TIMEOUT_SECS` (default 300) |
+| `POST /sync` | — | resolve → reconcile the workspace (one transfer from the object store — skips the download-to-control-plane + upload double hop); returns `{changed, added, updated, removed, errors}`; concurrent calls are serialized |
 | `POST /restart-agent` | — | SIGTERM the agent process (shared PID namespace) → the kubelet restarts just that container in place — no pod reschedule, no image pull; returns `{signaled: pid}` |
 | `GET /health` | — | `ok` — startupProbe target; answers only after the boot sync finished, which gates the agent container's start |
+| `GET /status` | — | `{sync_enabled, last_sync}` — outcome of the last sync attempt (`{at, ok, added, updated, removed, errors}` or `null`), so the control plane can tell a synced workspace from a booted-but-unsynced one (`/health` alone can't: the boot sync is best-effort) |
 
 No auth, matching the SDK (identity headers only): expose the port in-cluster
 only. Everything here runs with the sidecar's own privileges — nothing the agent
-container doesn't already have.
+container doesn't already have. `/execute` is remote command execution by
+design, so restrict who can reach the port with a NetworkPolicy:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sandbox-controller-ingress
+spec:
+  podSelector:
+    matchLabels: { app: my-agent } # your agent pods
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app: control-plane } # only the control plane
+      ports:
+        - port: 8888
+```
 
 ## Sync contract (stable — the control-plane integration surface)
 
@@ -63,8 +82,12 @@ container doesn't already have.
   - `WORKSPACE_ROOT` — absolute path of the agent workspace on the mounted volume.
   - `MODE` — `sidecar` to serve the HTTP API; unset/anything else = oneshot.
   - `SERVER_PORT` — sidecar listen port (default `8888`).
+  - `EXECUTE_TIMEOUT_SECS` — wall-clock limit for `/execute` commands (default
+    `300`); on expiry the whole process group is SIGKILLed.
   - `AGENT_PROCESS_PATTERN` — substring matched against `/proc/*/cmdline` to find
     the agent process for `/restart-agent` (e.g. the agent's entrypoint script).
+    Where several processes match, the lowest PID (the container's root process)
+    is signaled.
 - **Resolve** — `GET {RESOLVE_URL}` with `Authorization: Bearer {RESOLVE_TOKEN}`
   → `{ items: [{ type, name, version, sha256, targetPath, bundleUrl }], digest }`.
 - **Placement** — for each item, download `bundleUrl` (presigned; no auth),
@@ -152,7 +175,9 @@ the presence of their env vars:
 `RUST_LOG=agent_sandbox_controller=debug` — a bare `RUST_LOG=debug` also
 enables dependency chatter (e.g. hyper's two connection-pool lines per bundle
 download). OTLP export batches on a dedicated thread and is flushed on oneshot
-exit, so Job/initContainer errors aren't lost.
+exit, so Job/initContainer errors aren't lost. In sidecar mode the server
+drains on SIGTERM and flushes the OTLP buffer before exiting, so pod-shutdown
+errors aren't lost either.
 
 Bundle downloads are deliberately sequential over one pooled connection —
 dozens of small bundles sync in well under a second; bounded concurrency is an
@@ -165,6 +190,10 @@ cargo test
 cargo clippy --all-targets -- -D warnings
 cargo build --release
 ```
+
+The toolchain is pinned in `rust-toolchain.toml` (kept in lockstep with the
+Dockerfile builder image); rustup picks it up automatically. Install the
+pre-commit hooks with `pre-commit install` — CI runs the same hooks.
 
 ## License
 

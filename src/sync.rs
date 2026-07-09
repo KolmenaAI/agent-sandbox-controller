@@ -4,13 +4,21 @@
 //! round-trips.
 
 use std::fmt;
-use std::path::Path;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use serde::Deserialize;
 
 use crate::reconcile::{apply_diff, read_manifest, ResolvedResource, Summary};
 
+/// Resolved sync configuration — see `run()` for the env-var mapping.
+pub struct SyncConfig {
+    pub resolve_url: String,
+    pub token: String,
+    pub workspace_root: PathBuf,
+}
+
+#[derive(Debug)]
 pub enum SyncError {
     /// Sync is not configured (`RESOLVE_URL` unset) — a valid way to run the
     /// controller as a pure generic sandbox runtime, not a failure.
@@ -38,8 +46,7 @@ struct ResolveResponse {
     digest: String,
 }
 
-/// Resolve the desired set and reconcile the workspace. Never deletes on a
-/// failed resolve — the last-good workspace state is kept.
+/// Read the sync configuration from the environment and reconcile.
 pub fn run() -> Result<Summary, SyncError> {
     // RESOLVE_URL is the FULL resolve endpoint URL — the controller assumes no
     // path layout on the control plane.
@@ -58,7 +65,17 @@ pub fn run() -> Result<Summary, SyncError> {
             "RESOLVE_TOKEN / WORKSPACE_ROOT required when RESOLVE_URL is set".into(),
         ));
     }
-    let workspace_root = Path::new(&workspace);
+    run_with(&SyncConfig {
+        resolve_url,
+        token,
+        workspace_root: PathBuf::from(workspace),
+    })
+}
+
+/// Resolve the desired set and reconcile the workspace. Never deletes on a
+/// failed resolve — the last-good workspace state is kept.
+pub fn run_with(cfg: &SyncConfig) -> Result<Summary, SyncError> {
+    let workspace_root = cfg.workspace_root.as_path();
 
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(60))
@@ -66,8 +83,8 @@ pub fn run() -> Result<Summary, SyncError> {
         .map_err(|e| SyncError::Config(format!("http client init failed: {e}")))?;
 
     let resp = client
-        .get(&resolve_url)
-        .bearer_auth(&token)
+        .get(&cfg.resolve_url)
+        .bearer_auth(&cfg.token)
         .send()
         .map_err(|e| SyncError::Upstream(format!("resolve failed: {e}")))?;
     if !resp.status().is_success() {
@@ -102,4 +119,155 @@ pub fn run() -> Result<Summary, SyncError> {
         tracing::error!("apply failed: {e}");
     }
     Ok(summary)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bundle::sha256_hex;
+    use axum::routing::get;
+    use axum::{Json, Router};
+    use flate2::write::GzEncoder;
+    use flate2::Compression;
+    use serde_json::{json, Value};
+
+    fn tgz(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut builder = tar::Builder::new(GzEncoder::new(Vec::new(), Compression::default()));
+        for (path, data) in entries {
+            let mut header = tar::Header::new_gnu();
+            header.set_mode(0o644);
+            header.set_size(data.len() as u64);
+            header.set_cksum();
+            builder.append_data(&mut header, path, *data).unwrap();
+        }
+        builder.into_inner().unwrap().finish().unwrap()
+    }
+
+    /// Serve `app` on an ephemeral local port from a background thread (the
+    /// tests are sync because `run_with` uses blocking reqwest). The port is
+    /// known before the router is built so bundle URLs can reference it.
+    fn spawn_stub(app: Router) -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        listener.set_nonblocking(true).unwrap();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                axum::serve(listener, app).await.unwrap();
+            });
+        });
+        port
+    }
+
+    fn spawn_bundle_host(bundle: Vec<u8>) -> u16 {
+        spawn_stub(Router::new().route(
+            "/bundle",
+            get(move || {
+                let bundle = bundle.clone();
+                async move { bundle }
+            }),
+        ))
+    }
+
+    fn spawn_resolve_host(resolve: Value) -> u16 {
+        spawn_stub(Router::new().route(
+            "/resolve",
+            get(move || {
+                let resolve = resolve.clone();
+                async move { Json(resolve) }
+            }),
+        ))
+    }
+
+    fn test_workspace(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("asc-sync-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    fn cfg(resolve_port: u16, workspace_root: PathBuf) -> SyncConfig {
+        SyncConfig {
+            resolve_url: format!("http://127.0.0.1:{resolve_port}/resolve"),
+            token: "test-token".into(),
+            workspace_root,
+        }
+    }
+
+    fn resolve_item(sha256: &str, bundle_port: u16) -> Value {
+        json!({
+            "items": [{
+                "type": "skill",
+                "name": "weather",
+                "version": "1",
+                "sha256": sha256,
+                "targetPath": "skills/weather",
+                "bundleUrl": format!("http://127.0.0.1:{bundle_port}/bundle"),
+            }],
+            "digest": "d1",
+        })
+    }
+
+    #[test]
+    fn end_to_end_apply_noop_and_remove() {
+        let workspace = test_workspace("e2e");
+        let bundle = tgz(&[("SKILL.md", b"# weather")]);
+        let sha = sha256_hex(&bundle);
+        let bundle_port = spawn_bundle_host(bundle);
+
+        // First sync: the item is applied and recorded in the manifest.
+        let port = spawn_resolve_host(resolve_item(&sha, bundle_port));
+        let summary = run_with(&cfg(port, workspace.clone())).unwrap();
+        assert_eq!(summary.added, ["skill/weather@1"]);
+        assert!(summary.errors.is_empty());
+        assert_eq!(
+            std::fs::read(workspace.join("skills/weather/SKILL.md")).unwrap(),
+            b"# weather"
+        );
+
+        // Second sync against the same desired set: a no-op.
+        let summary = run_with(&cfg(port, workspace.clone())).unwrap();
+        assert!(
+            summary.added.is_empty() && summary.updated.is_empty() && summary.removed.is_empty()
+        );
+
+        // The item drops out of the desired set: the owned path is pruned.
+        let port = spawn_resolve_host(json!({ "items": [], "digest": "d2" }));
+        let summary = run_with(&cfg(port, workspace.clone())).unwrap();
+        assert_eq!(summary.removed, ["skills/weather"]);
+        assert!(!workspace.join("skills/weather").exists());
+    }
+
+    #[test]
+    fn sha256_mismatch_is_isolated_and_places_nothing() {
+        let workspace = test_workspace("badsha");
+        let bundle_port = spawn_bundle_host(tgz(&[("SKILL.md", b"# weather")]));
+        // The resolve response advertises a hash the real bundle can't match.
+        let port = spawn_resolve_host(resolve_item(&"0".repeat(64), bundle_port));
+
+        let summary = run_with(&cfg(port, workspace.clone())).unwrap();
+        assert!(summary.added.is_empty());
+        assert_eq!(summary.errors.len(), 1);
+        assert!(
+            summary.errors[0].contains("sha256 mismatch"),
+            "{:?}",
+            summary.errors
+        );
+        assert!(!workspace.join("skills/weather").exists());
+    }
+
+    #[test]
+    fn failed_resolve_is_upstream_error() {
+        let workspace = test_workspace("down");
+        // Nothing listens on this port (bound then dropped) — connection refused.
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let err = run_with(&cfg(port, workspace)).unwrap_err();
+        assert!(matches!(err, SyncError::Upstream(_)));
+    }
 }

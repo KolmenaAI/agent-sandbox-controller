@@ -14,6 +14,9 @@ use crate::bundle::{download_bundle, extract_tgz, sha256_hex};
 
 const MANIFEST_FILE: &str = ".managed.json";
 const BUNDLE_MAX_BYTES: usize = 25 * 1024 * 1024;
+// Unpacked cap is deliberately larger than the download cap — a legitimately
+// well-compressed 25 MB bundle must not fail on extraction.
+const BUNDLE_MAX_UNPACKED_BYTES: u64 = 100 * 1024 * 1024;
 const BUNDLE_MAX_FILES: usize = 2000;
 
 /// One resolved item from the control plane's resolve endpoint (camelCase JSON).
@@ -162,7 +165,7 @@ fn apply_one(
         let _ = fs::remove_file(&target);
     }
     fs::create_dir_all(&target).with_context(|| format!("mkdir {}", target.display()))?;
-    extract_tgz(&bytes, &target, BUNDLE_MAX_FILES, BUNDLE_MAX_BYTES as u64)?;
+    extract_tgz(&bytes, &target, BUNDLE_MAX_FILES, BUNDLE_MAX_UNPACKED_BYTES)?;
     Ok(())
 }
 

@@ -23,14 +23,17 @@ fn main() {
     let telemetry = telemetry::init();
 
     // Boot sync in every mode. Best-effort: a failure must never block the pod
-    // (oneshot) nor prevent the control API from coming up (sidecar).
-    match sync::run() {
+    // (oneshot) nor prevent the control API from coming up (sidecar). The
+    // result seeds `GET /status` so the control plane can tell a synced
+    // workspace from a booted-but-unsynced one.
+    let boot_sync = sync::run();
+    match &boot_sync {
         Ok(_) => {}
         Err(sync::SyncError::Disabled) => tracing::info!("{}", sync::SyncError::Disabled),
         Err(e) => tracing::warn!("boot sync failed ({e}) — continuing"),
     }
 
-    if std::env::var("MODE").unwrap_or_default().trim() == "sidecar" {
+    let exit_code = if std::env::var("MODE").unwrap_or_default().trim() == "sidecar" {
         // Two worker threads, not one-per-core: this resident per-pod sidecar
         // serves a low-traffic control port, and async I/O multiplexing gives
         // request concurrency regardless of thread count. Blocking work (file
@@ -40,9 +43,13 @@ fn main() {
             .enable_all()
             .build()
             .expect("tokio runtime");
-        rt.block_on(server::serve());
-    }
+        // Returns on SIGTERM/Ctrl-C (graceful drain) or fatal error — either
+        // way telemetry gets flushed below before the process exits.
+        rt.block_on(server::serve(&boot_sync))
+    } else {
+        0
+    };
 
     telemetry.shutdown();
-    std::process::exit(0);
+    std::process::exit(exit_code);
 }

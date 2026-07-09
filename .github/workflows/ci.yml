@@ -15,9 +15,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+      # Installs the pinned toolchain + components from rust-toolchain.toml —
+      # the same compiler as local builds and the Dockerfile.
+      - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - uses: actions/cache@v4
         with:
@@ -28,6 +28,31 @@ jobs:
       - run: pipx install pre-commit
       - run: pre-commit run --all-files --show-diff-on-failure
       - run: cargo test
+
+  # RustSec advisories against the dependency tree — this binary downloads and
+  # extracts remote content inside every agent pod, so vuln alerts matter.
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  # Prove the image builds (musl target, Dockerfile) before merge; the release
+  # job is the only place the image is pushed. Also warms the buildx cache.
+  image-build:
+    if: "!startsWith(github.ref, 'refs/tags/')"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
   release:
     # A release is a `vX.Y.Z` tag — and ONLY that. No edge/latest/dev/prod

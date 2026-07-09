@@ -22,15 +22,14 @@ mod telemetry;
 fn main() {
     let telemetry = telemetry::init();
 
-    // Boot sync in every mode. Best-effort: a failure must never block the pod
-    // (oneshot) nor prevent the control API from coming up (sidecar). The
-    // result seeds `GET /status` so the control plane can tell a synced
-    // workspace from a booted-but-unsynced one.
-    let boot_sync = sync::run();
+    // Boot sync with retries on upstream (network/control-plane) errors.
+    // Disabled and config errors don't retry. For oneshot (Jobs), failures
+    // should propagate as exit code 1; for sidecar, best-effort (log and continue).
+    let boot_sync = sync::run_with_retries(3);
     match &boot_sync {
         Ok(_) => {}
         Err(sync::SyncError::Disabled) => tracing::info!("{}", sync::SyncError::Disabled),
-        Err(e) => tracing::warn!("boot sync failed ({e}) — continuing"),
+        Err(e) => tracing::warn!("boot sync failed ({e})"),
     }
 
     let exit_code = if std::env::var("MODE").unwrap_or_default().trim() == "sidecar" {
@@ -44,10 +43,16 @@ fn main() {
             .build()
             .expect("tokio runtime");
         // Returns on SIGTERM/Ctrl-C (graceful drain) or fatal error — either
-        // way telemetry gets flushed below before the process exits.
+        // way telemetry gets flushed below before the process exits. Sidecar
+        // is best-effort: serve even if sync failed, the control plane can
+        // check GET /status to see the outcome.
         rt.block_on(server::serve(&boot_sync))
     } else {
-        0
+        // Oneshot (Job): exit 1 if sync failed (excluding Disabled which is OK).
+        match boot_sync {
+            Ok(_) | Err(sync::SyncError::Disabled) => 0,
+            Err(_) => 1,
+        }
     };
 
     telemetry.shutdown();

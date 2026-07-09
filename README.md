@@ -47,8 +47,8 @@ File paths are relative to `WORKSPACE_ROOT`; traversal is rejected.
 | `POST /execute` | `Commands.run` | `{command}` → `sh -c` with the workspace as cwd → `{stdout, stderr, exit_code}`; killed (whole process group) after `EXECUTE_TIMEOUT_SECS` (default 300) |
 | `POST /sync` | — | resolve → reconcile the workspace (one transfer from the object store — skips the download-to-control-plane + upload double hop); returns `{changed, added, updated, removed, errors}`; concurrent calls are serialized |
 | `POST /restart-agent` | — | SIGTERM the agent process (shared PID namespace) → the kubelet restarts just that container in place — no pod reschedule, no image pull; returns `{signaled: pid}` |
-| `GET /health` | — | `ok` — startupProbe target; answers only after the boot sync finished, which gates the agent container's start |
-| `GET /status` | — | `{sync_enabled, last_sync}` — outcome of the last sync attempt (`{at, ok, added, updated, removed, errors}` or `null`), so the control plane can tell a synced workspace from a booted-but-unsynced one (`/health` alone can't: the boot sync is best-effort) |
+| `GET /health` | — | `ok` — startupProbe target; answers only after the boot sync attempt (succeeded or failed), so the sidecar is ready to serve requests; the boot sync is best-effort and doesn't block the pod |
+| `GET /status` | — | `{sync_enabled, last_sync}` — outcome of the last sync attempt (`{at, ok, added, updated, removed, errors}` or `null`); use this to check if the workspace is actually synced, not just booted |
 
 No auth, matching the SDK (identity headers only): expose the port in-cluster
 only. Everything here runs with the sidecar's own privileges — nothing the agent

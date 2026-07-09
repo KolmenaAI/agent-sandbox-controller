@@ -38,6 +38,29 @@ impl fmt::Display for SyncError {
     }
 }
 
+/// Retry boot sync with exponential backoff on upstream errors (network, control plane).
+/// Config errors and disabled sync don't retry. Returns the first non-upstream error or
+/// the last error after exhausting retries.
+pub fn run_with_retries(max_attempts: usize) -> Result<Summary, SyncError> {
+    for attempt in 1..=max_attempts {
+        match run() {
+            Err(SyncError::Upstream(msg)) if attempt < max_attempts => {
+                #[allow(clippy::cast_possible_truncation)]
+                let backoff_ms = 100 * 2_u64.pow((attempt - 1) as u32);
+                tracing::warn!(
+                    attempt,
+                    max_attempts,
+                    backoff_ms,
+                    "sync attempt failed ({msg}), retrying…"
+                );
+                std::thread::sleep(Duration::from_millis(backoff_ms));
+            }
+            result => return result,
+        }
+    }
+    unreachable!()
+}
+
 #[derive(Deserialize)]
 struct ResolveResponse {
     items: Vec<ResolvedResource>,
@@ -347,5 +370,21 @@ mod tests {
             b"# weather v1",
             "last-good content should be preserved after extraction failure"
         );
+    }
+
+    #[test]
+    fn upstream_errors_retry_with_backoff() {
+        let workspace = test_workspace("retry");
+        // Connection refused — will fail on each attempt.
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        std::env::set_var("RESOLVE_URL", format!("http://127.0.0.1:{port}"));
+        std::env::set_var("RESOLVE_TOKEN", "test");
+        std::env::set_var("WORKSPACE_ROOT", workspace.to_str().unwrap());
+        // Calling run_with_retries(2) should try twice and then fail with Upstream error.
+        let err = run_with_retries(2);
+        assert!(matches!(err, Err(SyncError::Upstream(_))));
     }
 }

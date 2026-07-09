@@ -37,7 +37,7 @@ pub fn restart() -> Result<i32, RestartError> {
 #[cfg(target_os = "linux")]
 fn find_pid(pattern: &str) -> Option<i32> {
     let self_pid = std::process::id() as i32;
-    // Lowest matching PID: if the agent forked children with the same cmdline,
+    // Lowest matching PID: if the agent forked children with the same argv[0],
     // the lowest is most likely the container's root process — SIGTERMing a
     // child would not trigger the container restart.
     let mut best: Option<i32> = None;
@@ -55,12 +55,15 @@ fn find_pid(pattern: &str) -> Option<i32> {
         let Ok(raw) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
             continue;
         };
-        let cmdline = raw
+        // Extract argv[0] (first null-terminated string in cmdline).
+        let argv0 = raw
             .split(|b| *b == 0)
-            .map(String::from_utf8_lossy)
-            .collect::<Vec<_>>()
-            .join(" ");
-        if cmdline.contains(pattern) && best.is_none_or(|b| pid < b) {
+            .next()
+            .and_then(|s| std::str::from_utf8(s).ok())
+            .unwrap_or("");
+        // Match pattern against argv[0], not the full command line.
+        // This prevents /execute commands with matching filenames from being killed.
+        if argv0.contains(pattern) && best.is_none_or(|b| pid < b) {
             best = Some(pid);
         }
     }

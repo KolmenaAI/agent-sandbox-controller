@@ -130,7 +130,9 @@ pub fn app(state: AppState) -> Router {
         .route("/execute", post(execute))
         .route("/restart-agent", post(restart_agent))
         .route("/download/{*path}", get(download))
+        .route("/list", get(list_root))
         .route("/list/{*path}", get(list))
+        .route("/exists", get(exists_root))
         .route("/exists/{*path}", get(exists))
         .route("/sync", post(sync_route))
         .with_state(state)
@@ -323,6 +325,15 @@ struct ListEntry {
     mod_time: u64,
 }
 
+async fn list_root(State(state): State<AppState>) -> Response {
+    let full = state.workspace_root.clone();
+    match run_blocking(move || list_dir(&full)).await {
+        Err(r) => r,
+        Ok(Ok(entries)) => Json(entries).into_response(),
+        Ok(Err(())) => err(StatusCode::NOT_FOUND, "not found or not a directory"),
+    }
+}
+
 async fn list(State(state): State<AppState>, UrlPath(path): UrlPath<String>) -> Response {
     let full = match resolve_path(&state, &path) {
         Ok(p) => p,
@@ -365,10 +376,21 @@ fn list_dir(path: &std::path::Path) -> Result<Vec<ListEntry>, ()> {
     Ok(out)
 }
 
+async fn exists_root(State(state): State<AppState>) -> Response {
+    let full = state.workspace_root.clone();
+    match run_blocking(move || full.symlink_metadata().is_ok()).await {
+        Err(r) => r,
+        Ok(exists) => Json(json!({ "exists": exists })).into_response(),
+    }
+}
+
 async fn exists(State(state): State<AppState>, UrlPath(path): UrlPath<String>) -> Response {
     match resolve_path(&state, &path) {
         Err(r) => r,
-        Ok(full) => Json(json!({ "exists": full.symlink_metadata().is_ok() })).into_response(),
+        Ok(full) => match run_blocking(move || full.symlink_metadata().is_ok()).await {
+            Err(r) => r,
+            Ok(exists) => Json(json!({ "exists": exists })).into_response(),
+        },
     }
 }
 
@@ -705,6 +727,18 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0]["name"], "weather");
         assert_eq!(entries[0]["type"], "directory");
+
+        // list root
+        let resp = app
+            .clone()
+            .oneshot(Request::get("/list").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let entries: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        let names: Vec<&str> = entries.iter().filter_map(|e| e["name"].as_str()).collect();
+        assert!(names.contains(&"hello.txt"));
+        assert!(names.contains(&"skills"));
 
         // execute — runs with the workspace as cwd
         let resp = app

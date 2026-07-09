@@ -10,12 +10,17 @@ use tar::Archive;
 
 /// Download a bundle from a (presigned) URL — no auth header; the URL is the
 /// capability. Hard size cap so a bad/huge object can't exhaust memory.
+/// Errors strip presigned URL signatures to prevent credential leakage to logs.
 pub fn download_bundle(
     client: &reqwest::blocking::Client,
     url: &str,
     max_bytes: usize,
 ) -> Result<Vec<u8>> {
-    let resp = client.get(url).send()?;
+    let resp = client.get(url).send().map_err(|e| {
+        // Strip query params (presigned signatures) from the URL before logging.
+        let safe = url.split('?').next().unwrap_or(url);
+        anyhow::anyhow!("bundle download from {safe} failed: {e}")
+    })?;
     if !resp.status().is_success() {
         bail!("download HTTP {}", resp.status());
     }

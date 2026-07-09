@@ -82,6 +82,7 @@ mod tests {
 
     #[test]
     fn restart_config_error_pattern_not_set() {
+        let _env = crate::test_env::lock();
         std::env::remove_var("AGENT_PROCESS_PATTERN");
         let result = restart();
         assert!(matches!(result, Err(RestartError::Config(m)) if m.contains("not set")));
@@ -89,6 +90,7 @@ mod tests {
 
     #[test]
     fn restart_config_error_pattern_empty() {
+        let _env = crate::test_env::lock();
         std::env::set_var("AGENT_PROCESS_PATTERN", "   ");
         let result = restart();
         let ok = matches!(result, Err(RestartError::Config(_)));
@@ -109,7 +111,7 @@ mod tests {
 
         #[test]
         fn find_pid_excludes_self() {
-            let self_pid = std::process::id() as i32;
+            let self_pid = std::process::id().cast_signed();
             let pattern = "cargo";
             let pid = find_pid(pattern);
 
@@ -122,25 +124,30 @@ mod tests {
         fn restart_signal_success() {
             use std::process::Command;
 
-            let child = Command::new("sleep")
+            let _env = crate::test_env::lock();
+            let mut child = Command::new("sleep")
                 .arg("1000")
                 .spawn()
                 .expect("spawn sleep");
 
-            let pid = child.id() as i32;
+            let pid = child.id().cast_signed();
             let pattern = "sleep";
             std::env::set_var("AGENT_PROCESS_PATTERN", pattern);
 
             std::thread::sleep(std::time::Duration::from_millis(100));
 
             let result = restart();
+            std::env::remove_var("AGENT_PROCESS_PATTERN");
+
+            // Reap the child so it can't linger as a zombie, whether or not
+            // restart() found and SIGTERM'd it.
+            let _ = child.kill();
+            let _ = child.wait();
+
             assert!(
                 matches!(result, Ok(found_pid) if found_pid == pid),
-                "restart should signal the sleep process. Got {:?}",
-                result
+                "restart should signal the sleep process. Got {result:?}"
             );
-
-            std::env::remove_var("AGENT_PROCESS_PATTERN");
         }
     }
 }

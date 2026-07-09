@@ -17,7 +17,7 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # Installs the pinned toolchain + components from rust-toolchain.toml —
       # the same compiler as local builds and the Dockerfile.
       - run: rustup toolchain install
@@ -41,7 +41,7 @@ jobs:
   audit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -52,7 +52,7 @@ jobs:
     if: "!startsWith(github.ref, 'refs/tags/')"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v3
       - uses: docker/build-push-action@v6
         with:
@@ -67,7 +67,7 @@ jobs:
     if: "!startsWith(github.ref, 'refs/tags/')"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v3
 
       - name: Build image for testing
@@ -126,7 +126,7 @@ jobs:
       contents: write # create the GitHub Release
       packages: write # push the image to GHCR
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # The tag is the source of truth for the version. Refuse to release if
       # Cargo.toml disagrees, so an image can never ship a mismatched version.
       - name: Verify Cargo.toml version matches the tag

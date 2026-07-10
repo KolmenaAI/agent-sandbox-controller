@@ -17,6 +17,7 @@
 #![allow(clippy::result_large_err)]
 
 use std::fs;
+use std::future::IntoFuture;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
@@ -232,25 +233,38 @@ pub async fn serve(boot_sync: &Result<Summary, SyncError>) -> i32 {
     tracing::debug!(drain_secs, "graceful drain timeout configured");
     let drain_timeout = Duration::from_secs(drain_secs);
 
-    let serve_result = tokio::time::timeout(
-        drain_timeout,
-        axum::serve(listener, app(state)).with_graceful_shutdown(shutdown_signal()),
-    )
-    .await;
+    // Serve until SIGTERM, then drain in-flight requests — but cap the drain so we
+    // exit before Kubernetes' SIGKILL and main() gets to flush telemetry. The cap
+    // must bound ONLY the drain (the window AFTER the signal), not the whole server:
+    // wrapping the entire serve future in a timeout self-terminates the sidecar after
+    // drain_secs even when no shutdown was ever requested.
+    let draining = Arc::new(tokio::sync::Notify::new());
+    let signalled = draining.clone();
+    let server = axum::serve(listener, app(state))
+        .with_graceful_shutdown(async move {
+            shutdown_signal().await;
+            signalled.notify_one();
+        })
+        .into_future();
+    tokio::pin!(server);
 
-    // Log whether shutdown was clean (completed within drain window) or forced (timeout).
-    match serve_result {
-        Ok(Ok(())) => {
-            tracing::info!("server shutdown complete");
-            0
-        }
-        Ok(Err(e)) => {
-            tracing::error!("server error: {e}");
-            1
-        }
-        Err(_elapsed) => {
+    tokio::select! {
+        res = &mut server => match res {
+            Ok(()) => {
+                tracing::info!("server shutdown complete");
+                0
+            }
+            Err(e) => {
+                tracing::error!("server error: {e}");
+                1
+            }
+        },
+        () = async {
+            draining.notified().await;
+            tokio::time::sleep(drain_timeout).await;
+        } => {
             tracing::warn!(
-                "graceful drain timeout after {drain_secs}s; forcing shutdown to allow telemetry flush"
+                "graceful drain exceeded {drain_secs}s; forcing shutdown to allow telemetry flush"
             );
             0
         }

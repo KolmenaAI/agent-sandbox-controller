@@ -1,6 +1,6 @@
 [package]
 name = "agent-sandbox-controller"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "Apache-2.0"
 description = "Generic, agent-agnostic sandbox-side controller: reconciles an agent's declared resources (skills, …) onto its workspace volume and exposes the sandbox-runtime HTTP API (upload/download/list/exists/execute + sync/restart-agent)."

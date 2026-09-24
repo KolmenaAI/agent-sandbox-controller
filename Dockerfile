@@ -13,7 +13,7 @@ RUN mkdir src && echo 'fn main() {}' > src/main.rs && cargo build --release --lo
 COPY src ./src
 RUN touch src/main.rs && cargo build --release --locked
 
-FROM alpine:3.24.1
+FROM alpine:3.24.2
 
 # uid/gid 1001 matches the agent workspace volume ownership (fsGroup: 1001) so
 # the controller can write to the mounted workspace.

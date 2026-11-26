@@ -844,7 +844,7 @@ mod tests {
         let out: serde_json::Value = serde_json::from_slice(&body).unwrap();
         // printenv returns empty output and exit code 1 if var is not found
         assert_eq!(out["exit_code"], 1);
-        assert!(out["stdout"].as_str().unwrap().is_empty());
+        assert_eq!(out["stdout"].as_str().unwrap(), "");
     }
 
     #[tokio::test]

@@ -22,10 +22,16 @@ jobs:
       # the same compiler as local builds and the Dockerfile.
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+      # Runner image (e.g. ubuntu26) goes in the cache key: hook envs link
+      # against the runner's system interpreters (markdownlint → ruby), so a
+      # cache built on an older ubuntu-latest breaks when the image moves.
+      # ImageOS is a runner machine env var, not visible to `env.` expressions.
+      - id: runner-image
+        run: echo "os=$ImageOS" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@v6
         with:
           path: ~/.cache/pre-commit
-          key: pre-commit-${{ hashFiles('.pre-commit-config.yaml') }}
+          key: pre-commit-${{ steps.runner-image.outputs.os }}-${{ hashFiles('.pre-commit-config.yaml') }}
       # Runs rustfmt, cargo check, clippy (-D warnings) + generic hygiene hooks —
       # the same gate as local commits, so CI and dev machines can't drift.
       - run: pipx install pre-commit

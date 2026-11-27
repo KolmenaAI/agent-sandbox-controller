@@ -250,7 +250,7 @@ mod tests {
         let port = spawn_resolve_host(resolve_item(&sha, bundle_port));
         let summary = run_with(&cfg(port, workspace.clone())).unwrap();
         assert_eq!(summary.added, ["skill/weather@1"]);
-        assert!(summary.errors.is_empty());
+        assert_eq!(summary.errors, Vec::<String>::new());
         assert_eq!(
             std::fs::read(workspace.join("skills/weather/SKILL.md")).unwrap(),
             b"# weather"
@@ -277,7 +277,7 @@ mod tests {
         let port = spawn_resolve_host(resolve_item(&"0".repeat(64), bundle_port));
 
         let summary = run_with(&cfg(port, workspace.clone())).unwrap();
-        assert!(summary.added.is_empty());
+        assert_eq!(summary.added, Vec::<String>::new());
         assert_eq!(summary.errors.len(), 1);
         assert!(
             summary.errors[0].contains("sha256 mismatch"),
@@ -367,7 +367,7 @@ mod tests {
         let summary = run_with(&cfg(port, workspace.clone())).unwrap();
 
         // Apply should fail (hash mismatch)
-        assert!(!summary.errors.is_empty());
+        assert_ne!(summary.errors, Vec::<String>::new());
         assert!(summary.errors[0].contains("sha256 mismatch"));
 
         // But the last-good v1 content must be preserved — extraction was atomic.

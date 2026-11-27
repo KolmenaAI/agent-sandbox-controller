@@ -1,7 +1,7 @@
 # Static musl build → minimal alpine. Alpine (not distroless) because the
 # /execute endpoint needs `sh` (busybox); still ~10 MB total. The binary runs as
 # a resident sidecar in every agent pod, so size + RSS matter.
-FROM rust:1.96-alpine AS build
+FROM rust:1.100-alpine AS build
 
 RUN apk add --no-cache musl-dev
 WORKDIR /app
@@ -13,7 +13,7 @@ RUN mkdir src && echo 'fn main() {}' > src/main.rs && cargo build --release --lo
 COPY src ./src
 RUN touch src/main.rs && cargo build --release --locked
 
-FROM alpine:3.24.1
+FROM alpine:3.24.4
 
 # uid/gid 1001 matches the agent workspace volume ownership (fsGroup: 1001) so
 # the controller can write to the mounted workspace.

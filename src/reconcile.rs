@@ -300,7 +300,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["skills/weather"]
         );
-        assert!(d.remove.is_empty());
+        assert_eq!(d.remove, Vec::<String>::new());
     }
 
     #[test]
@@ -322,7 +322,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["skills/xlsx"]
         );
-        assert!(d.remove.is_empty());
+        assert_eq!(d.remove, Vec::<String>::new());
     }
 
     #[test]
@@ -358,9 +358,10 @@ mod tests {
         fs::create_dir_all(&workspace).unwrap();
 
         let desired = vec![item("skills/weather", "aaa")];
-        assert!(diff(&workspace, &desired, &Manifest::new())
-            .remove
-            .is_empty());
+        assert_eq!(
+            diff(&workspace, &desired, &Manifest::new()).remove,
+            Vec::<String>::new()
+        );
     }
 
     #[test]
@@ -423,7 +424,7 @@ mod tests {
         let d = diff(&workspace, &desired, &m);
         // Only the unowned safe key should be in remove; unsafe ones are ignored
         assert!(d.apply.is_empty());
-        assert!(d.remove.is_empty());
+        assert_eq!(d.remove, Vec::<String>::new());
     }
 
     #[test]
